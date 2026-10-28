@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |------|------|
-| 文件版本 | 0.3.0（草稿） |
+| 文件版本 | 0.4.0（草稿） |
 | 狀態 | 待審閱 |
 | 最後更新 | 2026-10-28 |
 | 適用範圍 | 全專案（單機桌面應用程式、CLI、Google Drive 儲存層） |
@@ -12,6 +12,8 @@
 > 0.2.0 版重大變更：由多使用者伺服器架構改為**個人使用、本機執行、資料加密後存放於個人 Google Drive** 的架構。
 >
 > 0.3.0 版變更：明確定位為**單機桌面應用程式**（圖形介面為主、CLI 為輔），並加入**從 Chrome 匯入已儲存的網址與帳密**。
+>
+> 0.4.0 版變更：Drive 上的**資料夾名稱與所有檔案名稱皆由使用者自訂**，系統只提供預設值；檔案辨識改以 Drive 檔案屬性為準，不依賴檔名。
 
 ---
 
@@ -62,7 +64,7 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
 **納入範圍（In Scope）**
 
 - 單一使用者的機密資料加密儲存、版本管理。
-- 以個人 Google 帳號授權，資料存放於 Google Drive 指定資料夾；資料夾不存在時自動建立。
+- 以個人 Google 帳號授權，資料存放於 Google Drive 指定資料夾；資料夾不存在時自動建立。資料夾與檔案名稱皆可由使用者自訂，系統提供預設值。
 - 多台裝置透過同一 Google 帳號與同一主密碼存取同一份資料，含同步與衝突處理。
 - SSH / TLS 金鑰對的產生、匯入、匯出、指紋計算、輪替、撤銷、主機綁定。
 - 從 Chrome 匯入已儲存的網址、帳號與密碼。
@@ -96,7 +98,8 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
 | KEK | Key Encryption Key，由主密碼推導的 256-bit 金鑰，用於包裝 DEK。 |
 | DEK | Data Encryption Key，每個 Item 檔案一把的隨機 256-bit 金鑰，用於實際加密內容。 |
 | Lock / Unlock | 本機尚未載入 KEK 的狀態為 locked；輸入主密碼推導出 KEK 後為 unlocked。 |
-| Drive Folder（Drive 資料夾） | Google Drive 上存放此 Vault 所有檔案的資料夾。 |
+| Drive Folder（Drive 資料夾） | Google Drive 上存放此 Vault 所有檔案的資料夾。名稱由使用者自訂，預設 `HolienSecretsManager`。 |
+| Naming Scheme（命名規則） | 此 Vault 在 Drive 上各類檔案的名稱設定，存於 Vault 標頭，所有裝置共用。 |
 | Device（裝置） | 執行 HSM 的一台電腦。每台裝置有獨立的 device_id，用於同步與衝突判斷。 |
 | Chrome 設定檔（Profile） | Chrome 存放單一使用者資料的目錄，內含 `Login Data` SQLite 資料庫，儲存網址、帳號與以作業系統金鑰加密的密碼。 |
 
@@ -106,7 +109,8 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
 
 | 編號 | 情境 |
 |------|------|
-| UC-01 | 使用者第一次在筆電上執行 `hsm init`，輸入主密碼、完成 Google 授權，工具在 Drive 建立 `HolienSecretsManager` 資料夾與空的 Vault。 |
+| UC-01 | 使用者第一次在筆電上啟動應用程式，輸入主密碼、完成 Google 授權，接受預設的資料夾與檔案名稱（或改成自己想要的名稱），工具在 Drive 建立資料夾與空的 Vault。 |
+| UC-01a | 使用者希望 Drive 上看起來不像密碼庫，將資料夾命名為 `Photos/2019`、標頭檔命名為 `notes.txt`、項目檔副檔名改為 `.jpg`；工具照常運作，因為辨識靠檔案屬性而非檔名。 |
 | UC-02 | 使用者為新伺服器產生一把 ed25519 SSH 金鑰，取得公鑰貼到伺服器 `authorized_keys`，並記錄此金鑰綁定於該主機的 `deploy` 帳號。 |
 | UC-03 | 使用者換到桌機，執行 `hsm init --existing`，完成 Google 授權並輸入主密碼，Vault 自動從 Drive 同步下來。 |
 | UC-04 | 使用者在桌機上將某把私鑰安裝到 `~/.ssh/`，或直接載入 ssh-agent，不經過磁碟。 |
@@ -143,16 +147,22 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
 | 編號 | 優先 | 需求 |
 |------|:--:|------|
 | FR-DRIVE-01 | P0 | 以 OAuth 2.0（桌面應用程式流程、PKCE）取得 Google Drive 授權；權限範圍最小化，預設使用 `drive.file`（只能存取本工具建立的檔案）。詳見 7.1。 |
-| FR-DRIVE-02 | P0 | 未指定資料夾時，於 My Drive 根目錄建立 `HolienSecretsManager` 資料夾。 |
-| FR-DRIVE-03 | P0 | 使用者可指定資料夾路徑，例如 `--drive-folder "Backups/Secrets"`；路徑以 `/` 分隔，逐層檢查，不存在的層級自動建立。 |
-| FR-DRIVE-04 | P0 | 指定路徑若已存在同名且由本工具建立、包含有效 Vault 標頭的資料夾，則連接該 Vault；若資料夾存在但不含 Vault 標頭，詢問是否在其中建立新 Vault。 |
-| FR-DRIVE-05 | P0 | 所有上傳到 Drive 的檔案在上傳前於本機加密（格式見第 8 章）；Drive 上的檔名為不可推測的識別碼，不含 Item 名稱或型別。 |
+| FR-DRIVE-02 | P0 | 資料夾路徑由使用者自訂，預設為 My Drive 根目錄下的 `HolienSecretsManager`。初始化時以預設值預先填入，使用者可直接接受或修改。 |
+| FR-DRIVE-03 | P0 | 資料夾路徑以 `/` 分隔，例如 `Backups/Secrets`；逐層檢查，不存在的層級自動建立。 |
+| FR-DRIVE-04 | P0 | 指定路徑若已存在由本工具建立、包含有效 Vault 標頭的資料夾，則連接該 Vault；若資料夾存在但不含 Vault 標頭，詢問是否在其中建立新 Vault。 |
+| FR-DRIVE-05 | P0 | 所有上傳到 Drive 的檔案在上傳前於本機加密（格式見第 8 章）；Item 檔名中代表該項目的部分為隨機識別碼，不含 Item 名稱或型別。 |
+| FR-DRIVE-12 | P0 | Drive 上每一類檔案的名稱皆由使用者自訂，系統提供預設值（見 7.3）。可自訂的項目：Vault 標頭檔名、索引檔名、操作紀錄檔名、主機檔名、Item 子資料夾名稱、Item 檔名樣式（含 `{id}` 佔位符與副檔名）。 |
+| FR-DRIVE-13 | P0 | 命名規則存於 Vault 標頭，其他裝置連接 Vault 時自動採用，不需重新輸入。 |
+| FR-DRIVE-14 | P0 | 檔案辨識以 Drive 檔案的 `appProperties`（`hsm.kind`、`hsm.vault_id`、`hsm.file_id`）為準，檔名只是顯示用途。使用者在 Drive 網頁手動改名不會破壞 Vault；工具偵測到檔名與命名規則不符時只在狀態畫面提示，不自動改回。 |
+| FR-DRIVE-15 | P0 | 檔名驗證：不得為空、不得含 `/`、長度不超過 200 字元、同一 Vault 內各類檔名不得相同、Item 檔名樣式必須含 `{id}`。不限制副檔名，允許使用者刻意用 `.txt`、`.jpg` 等名稱。 |
+| FR-DRIVE-16 | P1 | 事後修改命名規則：於設定畫面修改後，工具更新 Vault 標頭並逐一以 `files.update` 重新命名 Drive 上的檔案；中途失敗可重試，重試時以 `appProperties` 找到檔案，不受已改名或未改名影響。 |
+| FR-DRIVE-17 | P1 | 事後搬移資料夾：可指定新的資料夾路徑，工具以 `files.update` 變更資料夾的 parent，不重新上傳內容。 |
 | FR-DRIVE-06 | P0 | OAuth refresh token 存於作業系統金鑰圈（macOS Keychain / Linux Secret Service / Windows Credential Manager）；無金鑰圈時以 KEK 加密後存於本機設定目錄。 |
 | FR-DRIVE-07 | P0 | 處理 Drive API 的速率限制與暫時性錯誤：指數退避重試（最多 5 次），超過後回報明確錯誤並保留本機變更待下次同步。 |
 | FR-DRIVE-08 | P0 | 撤銷授權：`auth revoke` 向 Google 撤銷 token 並清除本機 token；不刪除 Drive 上的檔案。 |
 | FR-DRIVE-09 | P1 | 顯示 Drive 資料夾狀態：Item 數、總大小、最後同步時間、Drive 剩餘空間。 |
 | FR-DRIVE-10 | P1 | 以 Drive 的檔案修訂（revision）作為額外安全網；工具不主動刪除修訂。 |
-| FR-DRIVE-11 | P2 | 儲存層抽象：定義 `Storage` 介面（list / get / put / delete / revision），以便日後支援本機資料夾、S3 等後端。 |
+| FR-DRIVE-11 | P2 | 儲存層抽象：定義 `Storage` 介面（list / get / put / delete / rename / revision），以便日後支援本機資料夾、S3 等後端。 |
 
 ### 4.3 帳密管理（CRED）
 
@@ -328,12 +338,15 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
 
 | Google 可見 | Google 不可見 |
 |-------------|---------------|
-| 資料夾名稱（使用者自訂或預設） | 任何 Item 名稱、帳號、密碼、私鑰、備註、標籤 |
+| 資料夾名稱與檔案名稱（皆使用者自訂或預設） | 任何 Item 名稱、帳號、密碼、私鑰、備註、標籤 |
+| 檔案的 `appProperties`（`hsm.kind`、`hsm.vault_id` 等，標示檔案用途） | |
 | 檔案數量與各檔案大小 | Item 型別（檔名為隨機識別碼，內容加密） |
 | 檔案建立與修改時間 | 主機名稱與位址 |
 | Vault 標頭中的 KDF 參數與 salt（非機密） | 主密碼、KEK、DEK、復原金鑰 |
 
 檔案大小會透露粗略資訊（例如 RSA-4096 私鑰比 ed25519 大）。第一版接受此洩漏，第二階段可評估固定區塊填充（padding）。
+
+自訂檔名可讓 Drive 上的檔案看起來不像密碼庫，但 `appProperties` 仍標示用途，且檔案內容開頭有 `HSM1` magic bytes；自訂檔名是便利與偏好功能，不是安全機制，文件須明確說明。
 
 ### 5.3 本機安全
 
@@ -390,11 +403,12 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
              │ HTTPS（Google Drive API v3）
              ▼
    ┌──────────────────────────────┐
-   │ Google Drive                 │
+   │ Google Drive（名稱皆為預設值）│
    │ My Drive/HolienSecretsManager│
    │  ├ vault.hsm                 │
    │  ├ index.enc                 │
    │  ├ log.enc                   │
+   │  ├ hosts.enc                 │
    │  └ items/<id>.enc ...        │
    └──────────────────────────────┘
 ```
@@ -422,7 +436,7 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
 |------|------|------|
 | `~/.config/hsm/config.yaml` | Vault 清單、各 Vault 的 Drive 資料夾 ID、預設 Vault、agent 逾時等設定 | 0600 |
 | `~/.config/hsm/device_id` | 本裝置識別碼（UUID） | 0600 |
-| `~/.cache/hsm/<vault_id>/` | `vault.hsm`、`index.enc`、`log.enc`、`items/*.enc` 的快取，以及 `sync_state.json`（各檔案已知修訂、pending 標記） | 0700 / 0600 |
+| `~/.cache/hsm/<vault_id>/` | 各 Drive 檔案的快取，以及 `sync_state.json`（各檔案已知修訂、pending 標記、Drive 檔案 ID 對應）。本機快取一律使用固定內部名稱（`header`、`index`、`log`、`hosts`、`items/<id>`），與 Drive 上使用者自訂的檔名無關 | 0700 / 0600 |
 | OS 金鑰圈 | OAuth refresh token，鍵名 `hsm/<vault_id>/google` | 由系統管理 |
 
 Windows 對應路徑為 `%APPDATA%\hsm\` 與 `%LOCALAPPDATA%\hsm\cache\`。
@@ -440,7 +454,7 @@ Windows 對應路徑為 `%APPDATA%\hsm\` 與 `%LOCALAPPDATA%\hsm\cache\`。
 ### 7.2 資料夾解析與建立
 
 ```
-輸入：folder_path（預設 "HolienSecretsManager"）
+輸入：folder_path（使用者自訂，預設 "HolienSecretsManager"）
 1. 以 "/" 切割為 segments。
 2. parent = "root"。
 3. 對每個 segment：
@@ -449,27 +463,33 @@ Windows 對應路徑為 `%APPDATA%\hsm\` 與 `%LOCALAPPDATA%\hsm\cache\`。
    c. 找到多個 → 回報錯誤，要求使用者在 Drive 整理後重試（不自行猜測）。
    d. 找不到 → 建立資料夾，parent = 新資料夾 ID。
 4. 最終 parent 即 Vault 資料夾。
-5. 檢查是否存在 vault.hsm：
-   - 存在 → 讀取並驗證格式；此為既有 Vault。
-   - 不存在且資料夾為空 → 建立新 Vault。
-   - 不存在但資料夾非空 → 詢問使用者是否仍在此建立新 Vault。
+5. 以 query「parent = 該資料夾 AND appProperties has { key='hsm.kind' and value='header' }」尋找 Vault 標頭檔（不依賴檔名）：
+   - 找到一個 → 讀取並驗證格式；此為既有 Vault，命名規則由標頭載入。
+   - 找到多個 → 回報錯誤（資料夾內有多個 Vault 標頭）。
+   - 找不到且資料夾為空 → 以使用者指定的命名規則建立新 Vault。
+   - 找不到但資料夾非空 → 詢問使用者是否仍在此建立新 Vault。
 6. 在資料夾上設定 appProperties：{ "hsm.vault_id": <uuid>, "hsm.format": "1" }，供日後快速辨識。
+7. 連接既有 Vault 時另提供「以 vault_id 搜尋」途徑：query「appProperties has { key='hsm.kind' and value='header' }」列出此 Google 帳號下所有本工具建立的 Vault 標頭，使用者從清單選擇，不需記得資料夾路徑。
 ```
 
-### 7.3 檔案配置
+### 7.3 檔案配置與命名規則
 
-| Drive 檔名 | 內容 | 是否加密 | 更新時機 |
-|------------|------|:--:|------|
-| `vault.hsm` | Vault 標頭：格式版本、vault_id、KDF 參數與 salt、KEK 驗證段、RK-wrapped KEK、建立時間 | 部分（見 8.1） | 建立、變更主密碼、更新復原金鑰 |
-| `index.enc` | 所有 Item 的摘要：id、名稱、型別、標籤、狀態、updated_at、目前版本號、到期日、綁定主機 | 是 | 任何 Item 新增、改名、改標籤、狀態變更 |
-| `log.enc` | 操作紀錄（滾動保留最近 5,000 筆） | 是 | 每次操作後（可批次延後上傳） |
-| `items/<item_id>.enc` | 單一 Item 的全部版本 | 是 | 該 Item 變更時 |
-| `hosts.enc` | 所有 Host 紀錄與綁定關係 | 是 | Host 變更時 |
+所有名稱皆為**使用者自訂、系統提供預設值**。下表的「預設檔名」只是預設值，實際名稱由 Vault 標頭的 `naming` 區段決定（見 8.1）。
 
-- `<item_id>` 為 UUID v4，與 Item 內容無關。
-- `items/` 為 Drive 子資料夾。
+| 命名規則鍵 | 預設檔名 | `hsm.kind` | 內容 | 是否加密 | 更新時機 |
+|------------|----------|------------|------|:--:|------|
+| `header` | `vault.hsm` | `header` | Vault 標頭：格式版本、vault_id、KDF 參數與 salt、KEK 驗證段、RK-wrapped KEK、命名規則、建立時間 | 部分（見 8.1） | 建立、變更主密碼、更新復原金鑰、修改命名規則 |
+| `index` | `index.enc` | `index` | 所有 Item 的摘要：id、名稱、型別、標籤、狀態、updated_at、目前版本號、到期日、綁定主機 | 是 | 任何 Item 新增、改名、改標籤、狀態變更 |
+| `log` | `log.enc` | `log` | 操作紀錄（滾動保留最近 5,000 筆） | 是 | 每次操作後（可批次延後上傳） |
+| `hosts` | `hosts.enc` | `hosts` | 所有 Host 紀錄與綁定關係 | 是 | Host 變更時 |
+| `items_folder` | `items` | `items_folder` | 存放 Item 檔案的子資料夾 | 不適用 | 建立時 |
+| `item_pattern` | `{id}.enc` | `item` | 單一 Item 的全部版本；`{id}` 替換為該 Item 的 UUID v4 | 是 | 該 Item 變更時 |
+
+- `{id}` 為 UUID v4，與 Item 內容無關。`item_pattern` 可為任意含 `{id}` 的樣式，例如 `IMG_{id}.jpg`、`{id}`（無副檔名）。
+- `items_folder` 設為空字串時，Item 檔案直接放在 Vault 資料夾內，不建子資料夾。
+- 工具讀寫檔案時一律先以 `appProperties`（`hsm.kind`、`hsm.vault_id`，Item 另有 `hsm.file_id`）查詢取得 Drive 檔案 ID，並快取在 `sync_state.json`；檔名只在建立與重新命名時使用。
 - 所有檔案以 `multipart` 或 `resumable` 上傳；單檔小於 5 MB 用 multipart。
-- 上傳時帶 `appProperties`：`{ "hsm.kind": "item", "hsm.vault_id": ... }`，供 `list` 時以 query 過濾。
+- 修改命名規則（FR-DRIVE-16）流程：更新標頭 `naming` 並上傳 → 逐一 `files.update(name=...)` → 全部成功後更新本機快取的對應；任一步失敗時狀態畫面顯示「命名規則更新未完成」，可重試。
 
 ### 7.4 修訂與衝突
 
@@ -518,6 +538,14 @@ JSON，明文可讀（不含機密）：
     "nonce": "<base64 12 bytes>",
     "wrapped_kek": "<base64>"
   },
+  "naming": {
+    "header": "vault.hsm",
+    "index": "index.enc",
+    "log": "log.enc",
+    "hosts": "hosts.enc",
+    "items_folder": "items",
+    "item_pattern": "{id}.enc"
+  },
   "devices": [
     { "device_id": "...", "name": "macbook", "first_seen": "..." }
   ]
@@ -525,6 +553,7 @@ JSON，明文可讀（不含機密）：
 ```
 
 - `kek_check.ciphertext` 為字串 `"hsm-kek-check-v1"` 以 KEK 加密的結果，AAD 為 `vault_id`。
+- `naming` 為此 Vault 的命名規則，值皆為使用者自訂，上例為預設值。標頭檔自己的名稱也記在其中，供重新命名時使用。
 - `devices` 清單僅供顯示，不用於授權。
 
 ### 8.2 加密檔案格式（`index.enc`、`items/*.enc`、`log.enc`、`hosts.enc`、備份檔）
@@ -636,7 +665,7 @@ JSON，明文可讀（不含機密）：
 
 | 畫面 | 內容 | 優先 |
 |------|------|:--:|
-| 歡迎 / 初始化精靈 | 建立新 Vault 或連接既有 Vault；步驟：主密碼 → Google 授權 → Drive 資料夾 → 復原金鑰（顯示一次並要求確認） | P0 |
+| 歡迎 / 初始化精靈 | 建立新 Vault 或連接既有 Vault；步驟：主密碼 → Google 授權 → Drive 資料夾與檔案名稱（預先填入預設值，可展開「進階」修改各檔名與 Item 檔名樣式，即時驗證並預覽實際檔名）→ 復原金鑰（顯示一次並要求確認）。連接既有 Vault 時可輸入資料夾路徑，或從「此帳號下所有 Vault」清單選擇 | P0 |
 | 解鎖 | 輸入主密碼；提供「使用復原金鑰」入口 | P0 |
 | 主視窗 | 左側分類（全部 / 帳密 / 金鑰 / 憑證 / 主機 / 垃圾桶）與標籤；中間列表（名稱、摘要、狀態、更新時間）；右側詳細面板；頂部搜尋框 | P0 |
 | 帳密詳細 | 帳號、密碼（遮罩 + 顯示 + 複製）、網址（可開啟）、備註、標籤、到期日、版本列表、TOTP 碼（P1） | P0 |
@@ -648,6 +677,7 @@ JSON，明文可讀（不含機密）：
 | 匯入精靈 | 來源選擇（Chrome CSV / Chrome 設定檔 / 其他密碼管理器 / 私鑰檔 / ~/.ssh 掃描）→ 預覽與勾選 → 匯入報告 | P0（Chrome 設定檔與其他管理器為 P1） |
 | 同步與狀態 | pending、衝突列表（逐筆比較、選擇保留）、到期與逾期輪替提醒、missing 項目 | P0 |
 | 設定 | 自動鎖定時間、剪貼簿清除秒數、Drive 資料夾資訊、Google 授權狀態與撤銷、變更主密碼、重新產生復原金鑰、語言 | P0 |
+| 設定 → Drive 命名 | 顯示目前資料夾路徑與各檔案名稱；修改資料夾路徑（搬移）與命名規則（重新命名所有檔案），顯示進度與失敗重試 | P1 |
 | 操作紀錄 | 依時間、操作、Item 篩選 | P1 |
 | 系統匣選單 | 快速搜尋、鎖定、開啟主視窗、結束 | P1 |
 
@@ -673,13 +703,18 @@ JSON，明文可讀（不含機密）：
 
 ```
 # 初始化與帳號
-hsm init [--drive-folder PATH] [--existing] [--no-recovery-key] [--scope file|full]
+hsm init [--drive-folder PATH] [--existing | --existing-from-list]
+         [--name-header NAME] [--name-index NAME] [--name-log NAME] [--name-hosts NAME]
+         [--name-items-folder NAME] [--item-pattern PATTERN]     # 皆有預設值，見 7.3
+         [--no-recovery-key] [--scope file|full]
 hsm auth status
 hsm auth revoke
 hsm unlock                         # 啟動或喚醒 agent（P1）
 hsm lock
 hsm vault list
-hsm vault info
+hsm vault info                     # 含資料夾路徑與目前命名規則
+hsm vault rename-files [--name-header NAME] [...] [--item-pattern PATTERN]   # P1
+hsm vault move --drive-folder PATH # P1
 hsm vault change-password
 hsm vault recovery regenerate
 hsm vault recovery unlock          # 以復原金鑰解鎖並重設主密碼
@@ -824,6 +859,8 @@ hsm log [--since T] [--action A] [--item NAME] [--limit N]
 | Q-09 | 版本保留數量與垃圾桶保留期 | 10 版、30 天 | FR-CRED-02、FR-KEY-25 |
 | Q-10 | 操作紀錄是否同步到 Drive，或只留本機 | 同步（可看到各裝置紀錄） | FR-LOG-02 |
 | Q-11 | 是否需要支援 Google Workspace 帳號的共用雲端硬碟（Shared Drive） | 第一版不支援，只用 My Drive | 7.2 |
+| Q-14 | 預設名稱：資料夾 `HolienSecretsManager`、檔案 `vault.hsm` / `index.enc` / `log.enc` / `hosts.enc` / `items/{id}.enc` 是否合適 | 採用上述預設；若 Q-03 改了執行檔名稱，副檔名 `.hsm` 一併更名 | 7.3 |
+| Q-15 | 命名規則是否允許每台裝置各自不同（只存本機設定） | 否，存於 Vault 標頭、所有裝置一致，避免同一 Vault 在不同裝置產生不同檔名 | FR-DRIVE-13 |
 
 ---
 
@@ -866,4 +903,7 @@ hsm log [--since T] [--action A] [--item NAME] [--limit N]
 | 5 | `DRIVE_QUOTA` | Drive 空間不足 |
 | 5 | `OFFLINE` | 需要網路但不可用，且無 `--offline` |
 | 5 | `FOLDER_AMBIGUOUS` | 資料夾路徑對應到多個同名資料夾 |
+| 5 | `HEADER_AMBIGUOUS` | 資料夾內有多個 Vault 標頭 |
+| 2 | `INVALID_NAMING` | 檔名或 Item 檔名樣式不符合 FR-DRIVE-15 規則 |
+| 5 | `RENAME_INCOMPLETE` | 命名規則更新未全部完成，可重試 |
 | 6 | `CONFLICT_PENDING` | 存在未解決的同步衝突 |
