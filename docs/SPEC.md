@@ -2,12 +2,16 @@
 
 | 項目 | 內容 |
 |------|------|
-| 文件版本 | 0.1.0（草稿） |
+| 文件版本 | 0.3.0（草稿） |
 | 狀態 | 待審閱 |
 | 最後更新 | 2026-10-28 |
-| 適用範圍 | 全專案（後端服務、CLI、Web UI） |
+| 適用範圍 | 全專案（單機桌面應用程式、CLI、Google Drive 儲存層） |
 
 > 本文件為專案起始規格。專案目前為空專案，文件中所有「假設」與「待決議」項目皆需在開發前確認，詳見第 13 章與附錄 A。
+>
+> 0.2.0 版重大變更：由多使用者伺服器架構改為**個人使用、本機執行、資料加密後存放於個人 Google Drive** 的架構。
+>
+> 0.3.0 版變更：明確定位為**單機桌面應用程式**（圖形介面為主、CLI 為輔），並加入**從 Chrome 匯入已儲存的網址與帳密**。
 
 ---
 
@@ -15,19 +19,19 @@
 
 1. [專案概述](#1-專案概述)
 2. [名詞定義](#2-名詞定義)
-3. [使用者與角色](#3-使用者與角色)
+3. [使用情境](#3-使用情境)
 4. [功能需求](#4-功能需求)
 5. [安全設計](#5-安全設計)
 6. [系統架構](#6-系統架構)
-7. [資料模型](#7-資料模型)
-8. [API 規格](#8-api-規格)
-9. [CLI 規格](#9-cli-規格)
+7. [Google Drive 整合](#7-google-drive-整合)
+8. [資料格式](#8-資料格式)
+9. [介面規格](#9-介面規格)
 10. [非功能需求](#10-非功能需求)
 11. [建議技術選型](#11-建議技術選型)
 12. [開發階段規劃](#12-開發階段規劃)
 13. [待決議事項](#13-待決議事項)
 - [附錄 A：假設清單](#附錄-a假設清單)
-- [附錄 B：錯誤碼](#附錄-b錯誤碼)
+- [附錄 B：錯誤與結束碼](#附錄-b錯誤與結束碼)
 
 ---
 
@@ -35,42 +39,44 @@
 
 ### 1.1 目標
 
-Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見第 2 章）是一套自架（self-hosted）的機密資料管理系統，提供團隊集中、加密、可稽核地管理下列兩大類機密：
+Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見第 2 章）是一套**個人使用的單機桌面應用程式**，在使用者自己的電腦上執行，沒有伺服器端，將資料加密後存放在使用者自己的 Google Drive，管理下列兩大類機密：
 
-1. **帳號密碼（Credential）**：服務登入帳密、API Token、資料庫連線字串等。
-2. **伺服器金鑰（Key Pair）**：伺服器使用的非對稱金鑰對，包含 SSH 金鑰與 TLS 憑證私鑰，涵蓋產生、匯入、儲存、取用、輪替、撤銷與綁定主機的完整生命週期。
+1. **帳號密碼（Credential）**：網站與服務的登入帳密、API Token、資料庫連線字串等。
+2. **伺服器金鑰（Key Pair）**：個人管理的伺服器所使用的非對稱金鑰對，包含 SSH 金鑰與 TLS 憑證私鑰，涵蓋產生、匯入、儲存、取用、輪替、撤銷與綁定主機的完整生命週期。
 
 ### 1.2 要解決的問題
 
-- 帳密與金鑰散落在個人電腦、聊天軟體、共用文件中，無法掌握誰持有、誰取用過。
-- 伺服器私鑰缺乏集中保管與輪替機制，人員異動時難以確認金鑰是否已失效。
-- 缺乏存取紀錄，發生事故時無法追溯。
+- 帳密與伺服器私鑰散落在多台電腦的 `~/.ssh`、筆記、瀏覽器中，換電腦或重灌時容易遺失。
+- 多年累積在 Chrome 密碼管理器裡的網址與帳密，想一次搬進自己掌控、自己加密的地方。
+- 想利用現成的 Google Drive 做跨裝置同步與備份，但不希望 Google 或任何取得 Drive 存取權的人能讀到內容。
+- 伺服器金鑰缺乏盤點與輪替紀錄，不確定哪把金鑰放在哪台主機上。
 
-### 1.3 範圍
+### 1.3 核心設計：三個不變條件
+
+1. **資料永遠在上傳前於本機加密**。Google Drive 上只存在密文，檔名與內容皆不洩漏機密與其 metadata。
+2. **主密碼與由其推導的金鑰永不離開本機**，不存於 Google Drive、不傳送到任何伺服器。
+3. **沒有任何第三方伺服器**。工具只與 Google Drive API 溝通，不依賴專案方架設的任何服務。
+
+### 1.4 範圍
 
 **納入範圍（In Scope）**
 
-- 機密資料的加密儲存、版本管理與存取控制。
-- SSH / TLS 金鑰對的產生、匯入、匯出、指紋計算、輪替與撤銷。
-- 金鑰與伺服器主機（Host）的綁定關係維護。
-- 使用者帳號、角色權限（RBAC）、多因子驗證（MFA）。
-- 完整稽核日誌（Audit Log）。
-- REST API、CLI 工具、Web 管理介面。
+- 單一使用者的機密資料加密儲存、版本管理。
+- 以個人 Google 帳號授權，資料存放於 Google Drive 指定資料夾；資料夾不存在時自動建立。
+- 多台裝置透過同一 Google 帳號與同一主密碼存取同一份資料，含同步與衝突處理。
+- SSH / TLS 金鑰對的產生、匯入、匯出、指紋計算、輪替、撤銷、主機綁定。
+- 從 Chrome 匯入已儲存的網址、帳號與密碼。
+- 本機離線快取與本機操作紀錄。
+- 桌面圖形介面（主要介面）與 CLI（輔助，供終端機與腳本使用），兩者共用同一核心程式庫。
 
-**排除範圍（Out of Scope，至少第一版不做）**
+**排除範圍（Out of Scope）**
 
-- 自動將金鑰推送部署到目標伺服器（列為第三階段評估項目，見第 12 章）。
-- 憑證簽發（CA）功能；系統只保管私鑰與憑證，不扮演 CA。
-- 瀏覽器擴充套件、自動填表。
-- 硬體安全模組（Hardware Security Module）整合；保留介面但不在第一版實作。
-
-### 1.4 設計原則
-
-1. **預設安全（Secure by default）**：所有機密靜態加密，私鑰永不以明文落地。
-2. **最小權限**：每次取用機密值皆需明確授權並留下紀錄。
-3. **可稽核**：任何讀取機密值的行為皆不可被略過紀錄。
-4. **可自架**：單一二進位檔或單一容器即可啟動，不依賴外部雲端服務。
-5. **API 優先**：Web UI 與 CLI 皆透過同一組 API 運作，無後門路徑。
+- 多使用者、團隊共享、權限管理。
+- 自架伺服器、伺服器端 API。
+- 自動將金鑰推送部署到目標伺服器（第三階段評估）。
+- 憑證簽發（CA）功能。
+- 瀏覽器擴充套件與自動填表（匯入 Chrome 資料是一次性搬移，不是持續同步）。
+- Google Drive 以外的儲存後端（設計上保留儲存層介面，但第一版只實作 Google Drive）。
 
 ---
 
@@ -78,53 +84,39 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
 
 | 名詞 | 定義 |
 |------|------|
-| HSM | 本專案 Holien Secrets Manager 之簡稱。**不是**硬體安全模組。文件中提到硬體安全模組時一律使用全名。 |
-| Secret（機密） | 系統中任何被加密保存的資料單位，包含帳密、Token、金鑰對等，皆有型別（type）。 |
-| Credential（帳密） | Secret 的一種型別，由帳號、密碼、網址、備註等欄位組成。 |
-| Key Pair（金鑰對） | Secret 的一種型別，包含私鑰、公鑰、演算法、指紋等欄位。 |
-| Host（主機） | 一台伺服器或服務端點的紀錄，可與多把金鑰綁定。 |
-| Vault（金鑰庫） | Secret 的邏輯容器，為權限控管的基本單位。一個 Secret 只屬於一個 Vault。 |
-| Version（版本） | Secret 的值每次變更即產生一個新版本，舊版本保留供回溯。 |
-| KEK | Key Encryption Key，主金鑰，用於包裝（wrap）DEK。 |
-| DEK | Data Encryption Key，資料加密金鑰，每個 Secret 版本一把，用於實際加密機密值。 |
-| Seal / Unseal | 服務啟動時 KEK 尚未載入的狀態稱為 sealed；完成 KEK 載入後為 unsealed，方可服務機密讀寫。 |
-| Principal | 執行操作的主體，可能是使用者（User）或 API Token。 |
+| HSM | 本專案 Holien Secrets Manager 之簡稱。**不是**硬體安全模組。 |
+| Item（項目） | 系統中任何被加密保存的資料單位，有型別（type）：帳密、通用、金鑰對、TLS 憑證。 |
+| Credential（帳密） | Item 的一種型別，由帳號、密碼、網址、備註等欄位組成。 |
+| Key Pair（金鑰對） | Item 的一種型別，包含私鑰、公鑰、演算法、指紋等欄位。 |
+| Host（主機） | 一台伺服器的紀錄，可與多把金鑰綁定。 |
+| Vault（保險庫） | 一份完整資料集，對應 Google Drive 上的一個資料夾。一位使用者通常只有一個 Vault，但允許多個（例如工作與個人分開）。 |
+| Version（版本） | Item 的值每次變更即產生一個新版本，舊版本保留供回溯。 |
+| Master Password（主密碼） | 使用者記憶的唯一密碼，用於推導 KEK。遺失即無法解密資料。 |
+| Recovery Key（復原金鑰） | 建立 Vault 時產生的隨機金鑰，可在遺忘主密碼時解鎖 Vault。選用。 |
+| KEK | Key Encryption Key，由主密碼推導的 256-bit 金鑰，用於包裝 DEK。 |
+| DEK | Data Encryption Key，每個 Item 檔案一把的隨機 256-bit 金鑰，用於實際加密內容。 |
+| Lock / Unlock | 本機尚未載入 KEK 的狀態為 locked；輸入主密碼推導出 KEK 後為 unlocked。 |
+| Drive Folder（Drive 資料夾） | Google Drive 上存放此 Vault 所有檔案的資料夾。 |
+| Device（裝置） | 執行 HSM 的一台電腦。每台裝置有獨立的 device_id，用於同步與衝突判斷。 |
+| Chrome 設定檔（Profile） | Chrome 存放單一使用者資料的目錄，內含 `Login Data` SQLite 資料庫，儲存網址、帳號與以作業系統金鑰加密的密碼。 |
 
 ---
 
-## 3. 使用者與角色
+## 3. 使用情境
 
-### 3.1 使用者類型
-
-| 類型 | 說明 | 主要操作 |
-|------|------|----------|
-| 系統管理員（Admin） | 負責部署、備份、使用者管理 | 建立使用者、Unseal、查看全域稽核 |
-| 維運人員（Ops） | 管理伺服器與金鑰 | 產生/輪替金鑰、綁定主機、取用私鑰 |
-| 開發人員（Dev） | 使用帳密與 API Token | 讀取被授權的 Secret、建立個人 Token |
-| 自動化系統（CI/CD、腳本） | 以 API Token 身分存取 | 讀取特定 Secret |
-
-### 3.2 角色與權限（RBAC）
-
-權限以 Vault 為單位授予。系統角色與 Vault 角色分開。
-
-**系統角色**
-
-| 角色 | 權限 |
+| 編號 | 情境 |
 |------|------|
-| `system_admin` | 所有操作，包含使用者管理、系統設定、Unseal、全域稽核查詢。不自動擁有讀取任何 Vault 機密值的權限（需明確加入 Vault，確保稽核一致）。 |
-| `user` | 一般使用者，僅能操作被授權的 Vault。 |
-
-**Vault 角色**
-
-| 角色 | 列出 Secret | 讀取 metadata | 讀取機密值 | 建立/修改 | 刪除 | 管理成員 |
-|------|:--:|:--:|:--:|:--:|:--:|:--:|
-| `owner` | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
-| `editor` | ✔ | ✔ | ✔ | ✔ | ✔ | ✘ |
-| `reader` | ✔ | ✔ | ✔ | ✘ | ✘ | ✘ |
-| `metadata_reader` | ✔ | ✔ | ✘ | ✘ | ✘ | ✘ |
-
-- `metadata_reader` 可看到 Secret 存在、名稱、公鑰與指紋，但不可讀取私鑰或密碼。此角色供盤點與自動化檢查用。
-- 第一版不做 Secret 層級的個別權限覆寫，列為第二階段（見第 12 章）。
+| UC-01 | 使用者第一次在筆電上執行 `hsm init`，輸入主密碼、完成 Google 授權，工具在 Drive 建立 `HolienSecretsManager` 資料夾與空的 Vault。 |
+| UC-02 | 使用者為新伺服器產生一把 ed25519 SSH 金鑰，取得公鑰貼到伺服器 `authorized_keys`，並記錄此金鑰綁定於該主機的 `deploy` 帳號。 |
+| UC-03 | 使用者換到桌機，執行 `hsm init --existing`，完成 Google 授權並輸入主密碼，Vault 自動從 Drive 同步下來。 |
+| UC-04 | 使用者在桌機上將某把私鑰安裝到 `~/.ssh/`，或直接載入 ssh-agent，不經過磁碟。 |
+| UC-05 | 使用者將舊的 RSA 金鑰輪替為新金鑰，新舊版本並存，更新完所有主機後將舊版撤銷。 |
+| UC-06 | 使用者在沒有網路的環境查詢某個網站的密碼，工具使用本機快取回應。 |
+| UC-07 | 使用者在兩台裝置離線時各自修改同一個 Item，上線後工具偵測衝突，保留兩個版本並提示處理。 |
+| UC-08 | 使用者遺忘主密碼，以當初保存的復原金鑰解鎖並設定新主密碼。 |
+| UC-09 | 使用者匯出整個 Vault 為加密備份檔，離線保存於 USB 隨身碟。 |
+| UC-10 | 使用者在 Chrome 的密碼管理器匯出 CSV，拖進應用程式視窗，預覽後匯入數百筆網址與帳密，重複項目自動合併。 |
+| UC-11 | 使用者在應用程式中點「從 Chrome 匯入」，應用程式自動找到本機的 Chrome 設定檔，直接讀取並解密已儲存的帳密，不需手動匯出 CSV。 |
 
 ---
 
@@ -132,38 +124,49 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
 
 需求編號格式：`FR-<模組>-<序號>`。優先級：**P0** 必要（MVP）、**P1** 重要、**P2** 可延後。
 
-### 4.1 使用者與驗證（AUTH）
+### 4.1 初始化與解鎖（INIT）
 
 | 編號 | 優先 | 需求 |
 |------|:--:|------|
-| FR-AUTH-01 | P0 | 支援本地帳號，密碼以 Argon2id 雜湊儲存。 |
-| FR-AUTH-02 | P0 | 登入成功後核發短效 Session Token（建議 15 分鐘）與 Refresh Token（建議 8 小時）。 |
-| FR-AUTH-03 | P0 | 連續登入失敗達門檻（預設 5 次）後，帳號鎖定一段時間（預設 15 分鐘），並記錄稽核。 |
-| FR-AUTH-04 | P0 | 使用者可建立 API Token；Token 可設定有效期限與可存取的 Vault 範圍，且只在建立當下顯示一次。 |
-| FR-AUTH-05 | P1 | 支援 TOTP（RFC 6238）多因子驗證；管理員可設定全域強制啟用。 |
-| FR-AUTH-06 | P1 | 管理員可停用使用者；停用後其所有 Session 與 API Token 立即失效。 |
-| FR-AUTH-07 | P2 | 支援 OIDC 單一登入（SSO）。 |
+| FR-INIT-01 | P0 | `init` 流程：設定主密碼（需輸入兩次，並顯示強度評估）、完成 Google OAuth 授權、決定 Drive 資料夾、建立 Vault。 |
+| FR-INIT-02 | P0 | 主密碼最短 12 字元；工具以 zxcvbn 類演算法估算強度，低於門檻時警告但不強制拒絕。 |
+| FR-INIT-03 | P0 | 支援在新裝置以 `init --existing` 連接既有 Vault：授權 Google、找到 Drive 資料夾、下載 Vault 標頭、驗證主密碼、同步。 |
+| FR-INIT-04 | P0 | 建立 Vault 時產生復原金鑰（256-bit，以 Base32 分組顯示，共 52 字元），只顯示一次，並要求使用者確認已保存。使用者可選擇略過，略過時明確警告遺忘主密碼即無法復原。 |
+| FR-INIT-05 | P0 | 解鎖：執行需要讀寫機密的指令時提示輸入主密碼；輸入錯誤回傳明確錯誤且不洩漏任何資料。 |
+| FR-INIT-06 | P1 | 解鎖狀態維持：啟動本機 agent 程序在記憶體中保存 KEK，逾時（預設 15 分鐘，可設定）或執行 `lock` 後清除，期間指令不需重複輸入主密碼。 |
+| FR-INIT-07 | P1 | 變更主密碼：重新推導 KEK、重新包裝所有 Item 的 DEK、更新 Vault 標頭並上傳。過程中任一步失敗須可回復到原狀態。 |
+| FR-INIT-08 | P1 | 以復原金鑰解鎖並重設主密碼。 |
+| FR-INIT-09 | P2 | 支援多個 Vault（例如 `--vault work`），各自對應不同 Drive 資料夾，可使用不同 Google 帳號。 |
 
-### 4.2 Vault 管理（VAULT）
+### 4.2 Google Drive 儲存（DRIVE）
 
 | 編號 | 優先 | 需求 |
 |------|:--:|------|
-| FR-VAULT-01 | P0 | 使用者可建立 Vault，建立者自動成為 `owner`。 |
-| FR-VAULT-02 | P0 | Owner 可新增、移除成員並指派 Vault 角色。 |
-| FR-VAULT-03 | P0 | 刪除 Vault 前必須先清空其中所有 Secret，或改以「封存」狀態保留。 |
-| FR-VAULT-04 | P1 | 支援以群組（Group）為單位授權成員。 |
+| FR-DRIVE-01 | P0 | 以 OAuth 2.0（桌面應用程式流程、PKCE）取得 Google Drive 授權；權限範圍最小化，預設使用 `drive.file`（只能存取本工具建立的檔案）。詳見 7.1。 |
+| FR-DRIVE-02 | P0 | 未指定資料夾時，於 My Drive 根目錄建立 `HolienSecretsManager` 資料夾。 |
+| FR-DRIVE-03 | P0 | 使用者可指定資料夾路徑，例如 `--drive-folder "Backups/Secrets"`；路徑以 `/` 分隔，逐層檢查，不存在的層級自動建立。 |
+| FR-DRIVE-04 | P0 | 指定路徑若已存在同名且由本工具建立、包含有效 Vault 標頭的資料夾，則連接該 Vault；若資料夾存在但不含 Vault 標頭，詢問是否在其中建立新 Vault。 |
+| FR-DRIVE-05 | P0 | 所有上傳到 Drive 的檔案在上傳前於本機加密（格式見第 8 章）；Drive 上的檔名為不可推測的識別碼，不含 Item 名稱或型別。 |
+| FR-DRIVE-06 | P0 | OAuth refresh token 存於作業系統金鑰圈（macOS Keychain / Linux Secret Service / Windows Credential Manager）；無金鑰圈時以 KEK 加密後存於本機設定目錄。 |
+| FR-DRIVE-07 | P0 | 處理 Drive API 的速率限制與暫時性錯誤：指數退避重試（最多 5 次），超過後回報明確錯誤並保留本機變更待下次同步。 |
+| FR-DRIVE-08 | P0 | 撤銷授權：`auth revoke` 向 Google 撤銷 token 並清除本機 token；不刪除 Drive 上的檔案。 |
+| FR-DRIVE-09 | P1 | 顯示 Drive 資料夾狀態：Item 數、總大小、最後同步時間、Drive 剩餘空間。 |
+| FR-DRIVE-10 | P1 | 以 Drive 的檔案修訂（revision）作為額外安全網；工具不主動刪除修訂。 |
+| FR-DRIVE-11 | P2 | 儲存層抽象：定義 `Storage` 介面（list / get / put / delete / revision），以便日後支援本機資料夾、S3 等後端。 |
 
 ### 4.3 帳密管理（CRED）
 
 | 編號 | 優先 | 需求 |
 |------|:--:|------|
-| FR-CRED-01 | P0 | 建立帳密型 Secret，欄位：名稱、帳號、密碼、網址、備註、標籤。密碼與備註為加密欄位。 |
-| FR-CRED-02 | P0 | 修改密碼時產生新版本，舊版本保留，預設保留最近 10 個版本。 |
-| FR-CRED-03 | P0 | 讀取密碼值需呼叫獨立端點，與讀取 metadata 分開，並產生稽核紀錄。 |
-| FR-CRED-04 | P0 | 支援通用型 Secret（任意 key/value 或單一文字區塊），用於連線字串、設定檔等。 |
-| FR-CRED-05 | P1 | 內建密碼產生器，可設定長度與字元集。 |
-| FR-CRED-06 | P1 | 可設定到期日，到期前 N 天（預設 14 天）產生提醒。 |
-| FR-CRED-07 | P2 | 支援附件（檔案）型 Secret，大小上限預設 1 MB。 |
+| FR-CRED-01 | P0 | 建立帳密型 Item，欄位：名稱、帳號、密碼、網址、備註、標籤、TOTP 秘密（選填）。全部欄位皆為加密內容。 |
+| FR-CRED-02 | P0 | 修改任一欄位產生新版本，舊版本保留，預設保留最近 10 個版本。 |
+| FR-CRED-03 | P0 | 讀取密碼與讀取其他欄位（帳號、網址）為不同指令，避免列表時意外顯示密碼。 |
+| FR-CRED-04 | P0 | 支援通用型 Item（任意 key/value 或單一文字區塊），用於連線字串、設定檔、備援碼等。 |
+| FR-CRED-05 | P0 | 內建密碼產生器，可設定長度（預設 24）與字元集，可產生 passphrase 式密碼。 |
+| FR-CRED-06 | P1 | 若 Item 含 TOTP 秘密，可直接產生目前的 6 位驗證碼。 |
+| FR-CRED-07 | P1 | 可設定到期日，`status` 指令列出到期前 N 天（預設 14 天）的項目。 |
+| FR-CRED-08 | P1 | 以名稱、標籤、網址模糊搜尋。 |
+| FR-CRED-09 | P2 | 附件型 Item（任意檔案），單一附件上限預設 5 MB。 |
 
 ### 4.4 伺服器金鑰管理（KEY）
 
@@ -173,144 +176,192 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
 
 | 編號 | 優先 | 需求 |
 |------|:--:|------|
-| FR-KEY-01 | P0 | 在伺服器端產生金鑰對。支援演算法：`ed25519`（預設）、`rsa-4096`、`rsa-2048`、`ecdsa-p256`。 |
-| FR-KEY-02 | P0 | 支援匯入既有私鑰（OpenSSH 格式、PEM / PKCS#8）。匯入時自動推導公鑰與指紋，並驗證私鑰與使用者提供的公鑰（若有）相符。 |
-| FR-KEY-03 | P0 | 支援匯入 TLS 憑證與對應私鑰；系統自動解析憑證的 Subject、SAN、到期日並驗證私鑰與憑證匹配。 |
-| FR-KEY-04 | P0 | 金鑰對可設定用途（`purpose`）：`ssh`、`tls`、`signing`、`other`。 |
-| FR-KEY-05 | P1 | 產生金鑰時可選擇為私鑰加上 passphrase；passphrase 另存為加密欄位。 |
-| FR-KEY-06 | P1 | 支援僅儲存公鑰（無私鑰）的紀錄，用於登錄外部人員或外部系統的公鑰。 |
+| FR-KEY-01 | P0 | 在本機產生金鑰對。支援演算法：`ed25519`（預設）、`rsa-4096`、`rsa-2048`、`ecdsa-p256`。 |
+| FR-KEY-02 | P0 | 匯入既有私鑰（OpenSSH 格式、PEM / PKCS#1 / PKCS#8，含有 passphrase 的私鑰）。匯入時自動推導公鑰與指紋，並驗證與使用者提供的公鑰（若有）相符。 |
+| FR-KEY-03 | P0 | 從 `~/.ssh` 掃描並批次匯入現有金鑰（`key import --scan`），列出候選後由使用者勾選。 |
+| FR-KEY-04 | P0 | 匯入 TLS 憑證與對應私鑰；自動解析 Subject、SAN、到期日，驗證私鑰與憑證匹配。 |
+| FR-KEY-05 | P0 | 金鑰對可設定用途（`purpose`）：`ssh`、`tls`、`signing`、`other`。 |
+| FR-KEY-06 | P1 | 產生金鑰時可選擇為私鑰加上 passphrase；passphrase 另存為加密欄位，匯出時可選擇保留或移除。 |
+| FR-KEY-07 | P1 | 支援僅儲存公鑰（無私鑰）的紀錄，用於登錄外部系統或他人提供的公鑰。 |
 
-#### 4.4.2 儲存與取用
+#### 4.4.2 取用與匯出
 
 | 編號 | 優先 | 需求 |
 |------|:--:|------|
-| FR-KEY-10 | P0 | 私鑰以第 5 章定義的加密架構靜態加密；資料庫中不存在明文私鑰。 |
-| FR-KEY-11 | P0 | 公鑰與指紋（SHA256 與 MD5 兩種格式）為非加密 metadata，`metadata_reader` 以上皆可讀取。 |
-| FR-KEY-12 | P0 | 取用私鑰須呼叫獨立端點，需 `reader` 以上角色，且必須附上取用原因（`reason`，至少 1 字元）。每次取用皆寫入稽核。 |
-| FR-KEY-13 | P0 | 私鑰可以 OpenSSH、PEM（PKCS#1 / PKCS#8）格式匯出；格式轉換於伺服器端記憶體內完成。 |
-| FR-KEY-14 | P0 | 公鑰可以 OpenSSH `authorized_keys` 單行格式、PEM 格式輸出。 |
-| FR-KEY-15 | P1 | 可依指紋反查金鑰（用於從伺服器 `authorized_keys` 盤點）。 |
-| FR-KEY-16 | P2 | 支援 PuTTY `.ppk` 格式匯出。 |
+| FR-KEY-10 | P0 | 公鑰與指紋（SHA256 與 MD5 兩種格式）可直接顯示，不需額外確認。 |
+| FR-KEY-11 | P0 | 私鑰匯出預設寫入檔案，權限 `0600`；要輸出到 stdout 需明確加 `--stdout`，且偵測到 stdout 為終端時再次確認。 |
+| FR-KEY-12 | P0 | 私鑰可以 OpenSSH、PEM（PKCS#1 / PKCS#8）格式匯出；格式轉換於記憶體內完成。 |
+| FR-KEY-13 | P0 | 公鑰可以 OpenSSH `authorized_keys` 單行格式、PEM 格式輸出。 |
+| FR-KEY-14 | P0 | `key install`：將私鑰與公鑰寫入 `~/.ssh/<name>` 與 `~/.ssh/<name>.pub`，並可選擇在 `~/.ssh/config` 追加對應 Host 區塊。 |
+| FR-KEY-15 | P1 | `key ssh-add`：直接將私鑰載入執行中的 ssh-agent，不寫入磁碟；可設定存活時間。 |
+| FR-KEY-16 | P1 | 以指紋反查金鑰（用於從伺服器 `authorized_keys` 盤點）。 |
+| FR-KEY-17 | P2 | 支援 PuTTY `.ppk` 格式匯出。 |
 
 #### 4.4.3 生命週期
 
 | 編號 | 優先 | 需求 |
 |------|:--:|------|
-| FR-KEY-20 | P0 | 金鑰狀態：`active`、`retired`（已輪替、仍可讀取）、`revoked`（已撤銷、不可再取用私鑰）。 |
-| FR-KEY-21 | P0 | 輪替（rotate）：以相同演算法與設定產生新金鑰版本，舊版本自動轉為 `retired`。輪替後新舊版本並存，供維運人員完成伺服器端更換。 |
-| FR-KEY-22 | P0 | 撤銷（revoke）：需填寫原因；撤銷後私鑰不可再被任何角色讀取，僅 `system_admin` 可於緊急情況下以「破窗」（break-glass）流程取回，並產生高優先稽核事件。 |
-| FR-KEY-23 | P1 | 可設定金鑰到期日；TLS 憑證自動以憑證到期日為準。到期前 30 / 14 / 7 天產生提醒。 |
-| FR-KEY-24 | P1 | 可設定輪替政策（例如每 90 天），到期產生「應輪替」提醒；第一版不自動執行輪替。 |
-| FR-KEY-25 | P2 | 刪除金鑰採軟刪除，保留期（預設 30 天）後由排程永久清除。 |
+| FR-KEY-20 | P0 | 金鑰狀態：`active`、`retired`（已輪替，仍可讀取）、`revoked`（已撤銷，預設不可匯出私鑰）。 |
+| FR-KEY-21 | P0 | 輪替（rotate）：以相同演算法與設定產生新金鑰版本，舊版本自動轉為 `retired`。新舊並存，供使用者完成伺服器端更換；`key show` 列出所有版本與各自指紋。 |
+| FR-KEY-22 | P0 | 撤銷（revoke）：需填寫原因；撤銷後私鑰預設不可匯出，需加 `--force` 並再次確認。 |
+| FR-KEY-23 | P1 | 可設定金鑰到期日；TLS 憑證自動以憑證到期日為準。`status` 指令列出 30 / 14 / 7 天內到期項目。 |
+| FR-KEY-24 | P1 | 可設定輪替政策（例如每 90 天），`status` 指令列出逾期未輪替的金鑰；不自動執行輪替。 |
+| FR-KEY-25 | P1 | 刪除金鑰採軟刪除，進入垃圾桶，保留期（預設 30 天）後由 `gc` 指令永久清除。 |
 
 #### 4.4.4 主機綁定
 
 | 編號 | 優先 | 需求 |
 |------|:--:|------|
-| FR-KEY-30 | P0 | 建立 Host 紀錄：名稱、位址（IP 或 FQDN）、環境（`prod`/`staging`/`dev`/`other`）、備註、標籤。 |
-| FR-KEY-31 | P0 | 一把金鑰可綁定多台 Host，一台 Host 可綁定多把金鑰；綁定時記錄伺服器端使用的帳號（例如 `root`、`deploy`）與用途。 |
+| FR-KEY-30 | P0 | 建立 Host 紀錄：名稱、位址（IP 或 FQDN）、SSH 連接埠、環境（`prod`/`staging`/`dev`/`other`）、備註、標籤。 |
+| FR-KEY-31 | P0 | 一把金鑰可綁定多台 Host，一台 Host 可綁定多把金鑰；綁定時記錄伺服器端帳號（例如 `root`、`deploy`）與用途。 |
 | FR-KEY-32 | P0 | 可列出某台 Host 所有綁定的金鑰，及某把金鑰綁定的所有 Host。 |
-| FR-KEY-33 | P1 | 可記錄 Host 的 SSH host key 指紋，供 CLI 連線時比對。 |
-| FR-KEY-34 | P2 | 透過 SSH 連線到 Host 掃描 `authorized_keys`，與系統紀錄比對並回報差異（只讀，不修改）。 |
-| FR-KEY-35 | P2 | 透過 SSH 將公鑰推送到 Host 的 `authorized_keys`（需明確啟用且需二次確認）。 |
+| FR-KEY-33 | P0 | `host authorized-keys`：輸出該 Host 所有 active 金鑰的 `authorized_keys` 內容。 |
+| FR-KEY-34 | P1 | 可記錄 Host 的 SSH host key 指紋；`key install` 寫入 `~/.ssh/config` 時一併產生 `known_hosts` 行。 |
+| FR-KEY-35 | P2 | 透過 SSH 連線到 Host 讀取 `authorized_keys`，與紀錄比對並回報差異（唯讀）。 |
+| FR-KEY-36 | P2 | 透過 SSH 將公鑰推送到 Host 的 `authorized_keys`（需二次確認）。 |
 
-### 4.5 稽核日誌（AUDIT）
-
-| 編號 | 優先 | 需求 |
-|------|:--:|------|
-| FR-AUDIT-01 | P0 | 下列事件必須記錄：登入成功/失敗、Token 建立/撤銷、Vault 建立/成員變更、Secret 建立/修改/刪除、**每一次機密值讀取**、金鑰產生/匯入/輪替/撤銷/私鑰取用、Unseal、系統設定變更。 |
-| FR-AUDIT-02 | P0 | 每筆紀錄包含：時間（UTC）、Principal、操作類型、目標資源、來源 IP、User-Agent、結果（成功/失敗）、附加資訊（例如取用原因）。 |
-| FR-AUDIT-03 | P0 | 稽核紀錄為只增不改（append-only），API 不提供修改或刪除端點。 |
-| FR-AUDIT-04 | P0 | 寫入稽核失敗時，對應的機密讀取操作必須失敗（fail-closed）。 |
-| FR-AUDIT-05 | P1 | 可依時間、Principal、資源、操作類型查詢與匯出（JSON Lines / CSV）。 |
-| FR-AUDIT-06 | P1 | 可將稽核事件同步輸出到 syslog 或 Webhook。 |
-| FR-AUDIT-07 | P2 | 稽核紀錄雜湊鏈（hash chain），可驗證未被竄改。 |
-
-### 4.6 系統管理（SYS）
+### 4.5 同步與離線（SYNC）
 
 | 編號 | 優先 | 需求 |
 |------|:--:|------|
-| FR-SYS-01 | P0 | 首次啟動初始化流程：產生 KEK、建立第一位 `system_admin`、輸出 Unseal 所需資訊。 |
-| FR-SYS-02 | P0 | 服務啟動後為 sealed 狀態，需 Unseal 才能存取機密；健康檢查端點回報 seal 狀態。 |
-| FR-SYS-03 | P0 | 提供加密備份與還原指令；備份檔不含 KEK。 |
-| FR-SYS-04 | P1 | KEK 輪替：以新 KEK 重新包裝所有 DEK，過程中服務維持可讀。 |
-| FR-SYS-05 | P1 | 提供 Prometheus 格式指標端點。 |
+| FR-SYNC-01 | P0 | Google Drive 為資料的唯一真實來源（source of truth）；本機保有完整的加密快取，內容與 Drive 上的密文相同。 |
+| FR-SYNC-02 | P0 | 寫入操作：先寫本機快取並標記 `pending`，再上傳；上傳成功後清除標記。任何時刻中斷都不會造成資料遺失。 |
+| FR-SYNC-03 | P0 | 讀取操作：預設先同步索引（輕量），再讀取本機快取；`--offline` 時完全不連網。 |
+| FR-SYNC-04 | P0 | 每個 Item 為獨立檔案，衝突範圍限縮在單一 Item。 |
+| FR-SYNC-05 | P0 | 衝突偵測：上傳前比對 Drive 上該檔案的 `headRevisionId` 與本機記錄的已知修訂；不一致即為衝突。 |
+| FR-SYNC-06 | P0 | 衝突處理：下載遠端版本，將遠端與本機的變更都保留為版本，以 `updated_at` 較新者為目前版本，並在 Item 上標記 `conflict`；`status` 指令列出待處理衝突，`resolve` 指令由使用者選擇保留哪個版本。 |
+| FR-SYNC-07 | P0 | 索引檔（index）可由全部 Item 檔案重建（`sync --rebuild-index`），索引損毀不會造成資料遺失。 |
+| FR-SYNC-08 | P1 | 顯示同步狀態：pending 上傳數、最後同步時間、衝突數。 |
+| FR-SYNC-09 | P2 | 背景同步：agent 程序定期（預設 5 分鐘）同步索引並上傳 pending 項目。 |
 
-### 4.7 介面（UI）
+### 4.6 備份與匯入匯出（BACKUP）
 
 | 編號 | 優先 | 需求 |
 |------|:--:|------|
-| FR-UI-01 | P0 | CLI 覆蓋所有 P0 功能（規格見第 9 章）。 |
-| FR-UI-02 | P1 | Web UI 覆蓋帳密與金鑰的日常操作、Vault 成員管理、稽核查詢。 |
-| FR-UI-03 | P1 | Web UI 顯示機密值時預設遮罩，需點擊「顯示」並記錄稽核；複製到剪貼簿後 30 秒自動清除（瀏覽器允許時）。 |
+| FR-BAK-01 | P0 | `export --encrypted`：將整個 Vault（標頭、索引、所有 Item）打包為單一加密檔案（格式同第 8 章，以同一 KEK 加密），可直接以 `import` 還原到新的 Drive 資料夾。 |
+| FR-BAK-02 | P0 | `export --plain`：匯出為明文 JSON，需二次確認並顯示警告；輸出檔權限 `0600`。 |
+| FR-BAK-03 | P1 | 從其他密碼管理器的匯出檔匯入（Bitwarden JSON / CSV、1Password CSV、KeePass XML、Firefox 與 Edge CSV）。 |
+| FR-BAK-04 | P1 | `verify`：下載所有 Item 並驗證解密與完整性，回報損毀項目。 |
+
+#### 4.6.1 從 Chrome 匯入（CHROME）
+
+兩條途徑：**CSV 匯出檔**（可靠、跨平台，P0）與**直接讀取 Chrome 設定檔**（免手動匯出，但受作業系統與 Chrome 版本限制，P1）。
+
+| 編號 | 優先 | 需求 |
+|------|:--:|------|
+| FR-CHROME-01 | P0 | 匯入 Chrome 密碼管理器匯出的 CSV（欄位 `name,url,username,password,note`）。欄位順序不固定時以標題列對應；缺少 `url` 或 `password` 的列跳過並列入報告。 |
+| FR-CHROME-02 | P0 | 匯入前顯示預覽：總筆數、將新增、將合併、將跳過的筆數，以及每一筆的網址與帳號（密碼遮罩）。使用者可逐筆取消勾選。 |
+| FR-CHROME-03 | P0 | 欄位對應：`name` → Item 名稱（空白時以網址主機名稱 + 帳號組成）、`url` → 網址、`username` → 帳號、`password` → 密碼、`note` → 備註；所有匯入項目自動加上 `chrome-import` 標籤與匯入日期標籤。 |
+| FR-CHROME-04 | P0 | 重複判斷：同一正規化網址（去 scheme、去尾端 `/`、小寫主機名稱）且同一帳號視為同一項目。密碼相同 → 跳過；密碼不同 → 預設為既有 Item 新增一個版本（可改為跳過或另建項目）。 |
+| FR-CHROME-05 | P0 | 匯入完成後顯示報告並寫入操作紀錄；報告不含密碼。提示使用者刪除 CSV 檔，並提供「安全刪除」按鈕（覆寫後刪除，不保證在 SSD 上有效，文件須說明）。 |
+| FR-CHROME-06 | P1 | 直接讀取 Chrome 設定檔：自動偵測各平台預設路徑（下表），列出所有 Profile 供選擇，複製 `Login Data` 到暫存目錄後讀取，避免與執行中的 Chrome 衝突。 |
+| FR-CHROME-07 | P1 | 解密各平台的 Chrome 密碼加密：macOS 透過 Keychain 讀取「Chrome Safe Storage」金鑰（系統會跳出授權提示）；Linux 透過 Secret Service / KWallet 取得金鑰，退回 `peanuts` 預設金鑰；Windows 讀取 `Local State` 中以 DPAPI 保護的 AES 金鑰。無法取得金鑰時給出明確錯誤並引導改用 CSV 途徑。 |
+| FR-CHROME-08 | P1 | Windows 上 Chrome 127 以後的 App-Bound Encryption（`v20` 前綴）無法由第三方程式解密；偵測到時明確告知並引導改用 CSV 途徑，不嘗試繞過。 |
+| FR-CHROME-09 | P1 | 直接讀取途徑的預覽、欄位對應、重複判斷與報告規則同 CSV 途徑。 |
+| FR-CHROME-10 | P2 | 支援同為 Chromium 核心的 Edge、Brave、Chromium 設定檔路徑。 |
+
+**Chrome 設定檔預設路徑**
+
+| 平台 | 路徑 |
+|------|------|
+| macOS | `~/Library/Application Support/Google/Chrome/<Profile>/Login Data` |
+| Linux | `~/.config/google-chrome/<Profile>/Login Data` |
+| Windows | `%LOCALAPPDATA%\Google\Chrome\User Data\<Profile>\Login Data` |
+
+`<Profile>` 為 `Default`、`Profile 1`、`Profile 2` 等；顯示名稱從同目錄的 `Preferences` 檔讀取。
+
+**Chrome CSV 匯出步驟（寫入使用文件）**：Chrome 選單 → 密碼與自動填入 → Google 密碼管理工具 → 設定 → 匯出密碼。
+
+### 4.7 本機操作紀錄（LOG）
+
+個人工具不需要稽核，但保留操作紀錄便於回溯「我什麼時候改了什麼」。
+
+| 編號 | 優先 | 需求 |
+|------|:--:|------|
+| FR-LOG-01 | P0 | 本機記錄每次 Item 建立、修改、刪除、私鑰匯出、金鑰輪替、撤銷、同步衝突，含時間、裝置、操作、目標、結果。 |
+| FR-LOG-02 | P0 | 操作紀錄本身以 KEK 加密存於本機，並作為一個特殊 Item 同步到 Drive，使各裝置可看到彼此的紀錄。 |
+| FR-LOG-03 | P0 | 紀錄中絕不包含機密值。 |
+| FR-LOG-04 | P1 | `log` 指令可依時間、操作類型、Item 篩選。 |
+
+### 4.8 介面（UI）
+
+| 編號 | 優先 | 需求 |
+|------|:--:|------|
+| FR-UI-01 | P0 | 桌面圖形介面覆蓋所有 P0 功能（畫面規格見 9.1）。 |
+| FR-UI-02 | P0 | 圖形介面：機密值預設遮罩，點擊「顯示」才解密顯示；複製密碼或私鑰到剪貼簿後預設 30 秒清除。 |
+| FR-UI-03 | P0 | 圖形介面：視窗失焦超過設定時間（預設 5 分鐘）或系統進入休眠時自動鎖定，回到主密碼畫面。 |
+| FR-UI-04 | P0 | 圖形介面：支援拖放檔案（CSV、私鑰、憑證）到視窗直接進入對應匯入流程。 |
+| FR-UI-05 | P1 | CLI 覆蓋金鑰相關與同步相關的 P0 功能（規格見 9.2），供終端機工作流程與腳本使用；與圖形介面共用同一核心與同一本機快取。 |
+| FR-UI-06 | P1 | CLI 互動式提示在非 TTY 環境自動改為錯誤回報，不會卡住。 |
+| FR-UI-07 | P1 | 系統匣常駐：快速搜尋、複製、鎖定；關閉視窗時縮到系統匣。 |
+| FR-UI-08 | P2 | 全域快捷鍵呼叫快速搜尋視窗。 |
 
 ---
 
 ## 5. 安全設計
 
-### 5.1 加密架構（Envelope Encryption）
+### 5.1 加密架構
 
 ```
-                 ┌──────────────────────────┐
-                 │   KEK（主金鑰，256-bit）   │  ← 僅存在記憶體，來源見 5.2
-                 └────────────┬─────────────┘
-                              │ wrap / unwrap（AES-256-GCM）
-          ┌───────────────────┼───────────────────┐
-          ▼                   ▼                   ▼
-   DEK（Secret v1）     DEK（Secret v2）     DEK（Key Pair v1）   ← 每個版本一把，隨機 256-bit
-          │                   │                   │
-          ▼ AES-256-GCM       ▼                   ▼
-   密文（密碼欄位）     密文（密碼欄位）      密文（私鑰 PEM）
+  主密碼（使用者記憶）                 復原金鑰（隨機 256-bit，選用）
+         │                                    │
+         ▼ Argon2id（salt 存於 Vault 標頭）     ▼ HKDF
+       KEK（256-bit，僅存在記憶體）  ◄── wrap ── RK-wrapped KEK（存於 Vault 標頭）
+         │
+         │ wrap / unwrap（AES-256-GCM）
+   ┌─────┼──────────────┬──────────────────┐
+   ▼     ▼              ▼                  ▼
+ DEK(index)   DEK(item A)    DEK(item B)    DEK(log)     ← 每個檔案一把，隨機 256-bit
+   │           │              │               │
+   ▼ AES-256-GCM              ▼               ▼
+ index.enc   items/<id>.enc  items/<id>.enc  log.enc     ← 上傳到 Google Drive 的檔案
 ```
 
-- 每個 Secret 版本產生一把隨機 DEK（256-bit，CSPRNG）。
-- 機密欄位以 AES-256-GCM 加密，nonce 為 96-bit 隨機值，每次加密不重複。
-- AAD（Additional Authenticated Data）包含 `secret_id`、`version`、`field_name`，防止密文被搬移到其他紀錄。
-- DEK 以 KEK 包裝後與密文一同存入資料庫；KEK 永不落地到資料庫。
-- 資料庫中儲存的欄位：`ciphertext`、`nonce`、`wrapped_dek`、`kek_id`（供 KEK 輪替時辨識）。
+- **KEK 推導**：Argon2id，預設參數記憶體 256 MB、迭代 3、並行 4；參數與 32-byte salt 存於 Vault 標頭，允許日後調高。
+- **每個檔案一把 DEK**：256-bit CSPRNG 產生，以 KEK 用 AES-256-GCM 包裝後存於該檔案標頭。
+- **內容加密**：AES-256-GCM，96-bit 隨機 nonce，每次寫入重新產生。
+- **AAD**：包含檔案格式版本、Vault ID、檔案 ID、檔案類型，防止密文被搬移到其他檔案或其他 Vault。
+- **KEK 驗證**：Vault 標頭存一段以 KEK 加密的固定內容，解鎖時先解此段以判斷主密碼是否正確，不需下載任何 Item。
+- **復原金鑰**：若啟用，KEK 另以復原金鑰經 HKDF 推導的金鑰包裝後存於 Vault 標頭。變更主密碼不影響復原金鑰；重新產生復原金鑰則重新包裝。
 
-### 5.2 KEK 來源與 Unseal
+### 5.2 Google Drive 上可見的資訊
 
-依部署需求擇一，由系統設定決定：
+| Google 可見 | Google 不可見 |
+|-------------|---------------|
+| 資料夾名稱（使用者自訂或預設） | 任何 Item 名稱、帳號、密碼、私鑰、備註、標籤 |
+| 檔案數量與各檔案大小 | Item 型別（檔名為隨機識別碼，內容加密） |
+| 檔案建立與修改時間 | 主機名稱與位址 |
+| Vault 標頭中的 KDF 參數與 salt（非機密） | 主密碼、KEK、DEK、復原金鑰 |
 
-| 模式 | 說明 | 適用情境 |
-|------|------|----------|
-| `passphrase` | 管理員於 Unseal 時輸入通關密語，以 Argon2id（記憶體 64 MB、迭代 3、並行 4）推導 KEK。 | 小型團隊、單機 |
-| `file` | KEK 存於服務主機上的受保護檔案（權限 0600），啟動時自動 Unseal。 | 容器化部署、搭配磁碟加密 |
-| `kms` | 由外部 KMS（例如雲端 KMS 或硬體安全模組）包裝 KEK，啟動時請求解封。 | 第三階段 |
+檔案大小會透露粗略資訊（例如 RSA-4096 私鑰比 ed25519 大）。第一版接受此洩漏，第二階段可評估固定區塊填充（padding）。
 
-- Unseal 前：所有機密讀寫端點回傳 `503 SEALED`；metadata 查詢亦不開放，避免洩漏存在性。
-- 第一版實作 `passphrase` 與 `file`，`kms` 保留介面。
+### 5.3 本機安全
 
-### 5.3 私鑰處理原則
+1. KEK 與明文機密僅在處理期間存在記憶體，使用後立即覆寫（zeroize）。
+2. agent 程序（FR-INIT-06）以 `mlock` 或等效機制防止 KEK 被換頁到磁碟；逾時或系統休眠時清除。
+3. 本機快取只存密文，與 Drive 上內容相同；本機快取遭竊等同 Drive 檔案遭竊，仍受主密碼保護。
+4. 本機設定目錄權限 `0700`，其中所有檔案 `0600`。
+5. 任何日誌、錯誤訊息、崩潰報告不得包含機密值、主密碼、KEK、OAuth token。
+6. 寫入私鑰到磁碟時，拒絕寫入到 world-readable 目錄並警告。
 
-1. 私鑰明文僅在處理請求期間存在於伺服器記憶體，處理完畢立即覆寫（zeroize）。
-2. 私鑰明文不得出現在任何日誌、錯誤訊息、Debug 輸出。
-3. API 回傳私鑰時，回應標頭加上 `Cache-Control: no-store`，且禁止 HTTP 壓縮。
-4. CLI 取得私鑰寫入檔案時，權限固定為 `0600`，並拒絕寫入到 world-readable 的目錄。
-5. 已撤銷（`revoked`）的私鑰在資料層不刪除，但 API 層強制拒絕讀取；break-glass 例外見 FR-KEY-22。
+### 5.4 Google 授權安全
 
-### 5.4 傳輸與 API 安全
-
-- 僅接受 HTTPS（TLS 1.2 以上，建議 1.3）；可設定由反向代理終止 TLS，此時服務需驗證 `X-Forwarded-*` 僅來自信任的代理。
-- 所有回應加上 `Strict-Transport-Security`、`X-Content-Type-Options: nosniff`、`Content-Security-Policy`。
-- 登入、Unseal、私鑰取用端點套用速率限制（預設每 IP 每分鐘 10 次）。
-- API Token 以 `hsm_` 前綴 + 32 bytes 隨機值組成，資料庫只存其 SHA-256 雜湊。
-- 請求體大小上限預設 2 MB。
+- 使用 OAuth 2.0 授權碼流程加 PKCE，redirect 至本機 loopback 位址。
+- 預設權限範圍 `https://www.googleapis.com/auth/drive.file`：只能看到與操作本工具建立的檔案，無法讀取使用者其他 Drive 內容。
+- Refresh token 存於作業系統金鑰圈；access token 只存在記憶體。
+- 不使用 Google 帳號做任何身分驗證用途；Google 授權只決定「能否存取 Drive 檔案」，解密仍完全依賴主密碼。
 
 ### 5.5 威脅模型
 
-| 威脅 | 防護措施 |
-|------|----------|
-| 資料庫檔案或備份外洩 | 所有機密欄位加密，KEK 不在資料庫與備份中。 |
-| 內部人員超權讀取 | Vault RBAC、每次讀值皆稽核、私鑰取用需原因。 |
-| 離職人員仍持有金鑰 | 停用帳號即失效 Token；金鑰輪替與撤銷流程；Host 綁定可盤點受影響主機。 |
-| 服務主機記憶體被傾印 | KEK 與私鑰明文停留時間最短化、zeroize；此威脅無法完全消除，列為已知限制。 |
-| API Token 外洩 | Token 有效期、Vault 範圍限制、可即時撤銷、稽核可追蹤來源 IP。 |
-| 重放與密文搬移 | AES-GCM AAD 綁定資源識別；Session Token 短效。 |
-| 暴力破解登入 | Argon2id、失敗鎖定、速率限制、MFA。 |
-
-**已知限制**：擁有服務主機 root 權限且能取得記憶體的攻擊者可取得 KEK。系統不試圖防禦此情境，需以主機層級控管補強。
+| 威脅 | 防護措施 | 殘餘風險 |
+|------|----------|----------|
+| Google 帳號遭入侵，攻擊者取得 Drive 檔案 | 全部內容客戶端加密，Argon2id 抵抗離線暴力破解 | 弱主密碼可被破解；檔案大小洩漏粗略資訊 |
+| 攻擊者刪除或竄改 Drive 檔案 | AES-GCM 驗證竄改；Drive 修訂歷史與本機快取可還原；`verify` 指令偵測 | 攻擊者可造成資料遺失（可用性），需靠備份補救 |
+| 本機電腦遭竊 | 快取為密文；OAuth token 在金鑰圈；agent 逾時清除 KEK | 電腦處於 unlocked 且未鎖定螢幕時無保護 |
+| 本機惡意軟體 | 超出本工具防護範圍 | 可讀取記憶體中的 KEK 與明文；列為已知限制 |
+| 主密碼遺忘 | 復原金鑰 | 兩者皆遺失則資料永久不可讀 |
+| 多裝置同時修改 | 每 Item 獨立檔案、修訂比對、保留雙方版本 | 需使用者手動解決衝突 |
+| 工具本身的 OAuth client 憑證外洩 | 桌面應用程式的 client secret 本就不視為機密；PKCE 防止授權碼攔截 | 他人可冒用 client 名稱釣魚，需在文件提醒使用者 |
 
 ---
 
@@ -319,424 +370,390 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
 ### 6.1 元件
 
 ```
-┌──────────┐   ┌──────────┐   ┌─────────────┐
-│  Web UI  │   │   CLI    │   │ CI/CD 腳本   │
-└────┬─────┘   └────┬─────┘   └──────┬──────┘
-     │ HTTPS         │ HTTPS          │ HTTPS（API Token）
-     └───────────────┼────────────────┘
-                     ▼
-         ┌───────────────────────┐
-         │   HSM Server（單一程序） │
-         │  ├ API 層（REST）       │
-         │  ├ 授權層（RBAC）       │
-         │  ├ 加密層（KEK/DEK）    │
-         │  ├ 金鑰引擎（產生/轉換）  │
-         │  ├ 稽核寫入器           │
-         │  └ 排程器（到期提醒等）   │
-         └───────────┬───────────┘
-                     ▼
-         ┌───────────────────────┐
-         │  資料庫                │
-         │  SQLite（單機）/        │
-         │  PostgreSQL（多節點）    │
-         └───────────────────────┘
+┌───────────────────────────────────────────────────────┐
+│                     使用者的電腦                        │
+│                                                       │
+│  ┌──────────┐    ┌──────────────┐                     │
+│  │ 桌面 GUI  │───▶│ Core 程式庫   │                     │
+│  └──────────┘    │ ├ Vault 管理  │    ┌──────────────┐ │
+│  ┌──────────┐    │ ├ 加密層      │◀──▶│ agent（選用） │ │
+│  │ CLI      │───▶│ ├ 金鑰引擎    │    │ 保存 KEK     │ │
+│  └──────────┘    │ ├ 同步引擎    │    └──────────────┘ │
+│                  │ ├ 匯入引擎    │                     │
+│                  │ └ 儲存層介面  │                     │
+│                  └──────┬───────┘                     │
+│            ┌────────────┼──────────────┐              │
+│            ▼            ▼              ▼              │
+│   ~/.config/hsm/   ~/.cache/hsm/   OS 金鑰圈           │
+│   設定、裝置 ID     加密快取、索引    OAuth token        │
+└────────────┬──────────────────────────────────────────┘
+             │ HTTPS（Google Drive API v3）
+             ▼
+   ┌──────────────────────────────┐
+   │ Google Drive                 │
+   │ My Drive/HolienSecretsManager│
+   │  ├ vault.hsm                 │
+   │  ├ index.enc                 │
+   │  ├ log.enc                   │
+   │  └ items/<id>.enc ...        │
+   └──────────────────────────────┘
 ```
 
-- 伺服器為單一程序，內嵌 Web UI 靜態檔，部署時為單一二進位檔或單一容器映像。
-- Web UI 為純前端 SPA，只透過 REST API 與後端溝通，無伺服器端渲染機密值。
-- CLI 與 Web UI 使用完全相同的 API，不存在只供其中一方使用的端點。
+- 本產品為單機桌面應用程式，沒有伺服器端。Core 程式庫包含所有邏輯，桌面 GUI 與 CLI 都只是薄殼，兩者可同時安裝並共用同一本機快取與設定。
+- 匯入引擎處理 Chrome 與其他密碼管理器的資料來源，輸出統一的候選清單交給 Vault 管理層做重複判斷。
+- 儲存層介面抽象 Drive 操作，測試時可以本機資料夾實作替代。
+- agent 為選用程序，不存在時每個指令各自提示主密碼。
 
-### 6.2 請求流程（讀取私鑰為例）
+### 6.2 操作流程（以「匯出私鑰」為例，GUI 與 CLI 相同）
 
-1. 用戶端帶 Bearer Token 呼叫 `POST /api/v1/keys/{id}/private`，body 含 `reason`。
-2. API 層驗證 Token 有效、未過期、Principal 未被停用。
-3. 授權層確認 Principal 在該金鑰所屬 Vault 擁有 `reader` 以上角色，且 Token 範圍包含該 Vault。
-4. 檢查金鑰狀態非 `revoked`。
-5. **先寫入稽核紀錄**（含 reason）；寫入失敗則回傳 500，不繼續。
-6. 加密層以 KEK 解開 DEK，解密私鑰，依請求格式轉換。
-7. 回傳私鑰，回應完成後 zeroize 記憶體。
+1. 介面層讀取設定，取得 Vault 的 Drive 資料夾 ID 與本機快取路徑。
+2. 取得 KEK：GUI 於解鎖後保存在程序記憶體；CLI 向 agent 詢問，agent 不存在或已逾時則提示主密碼，以 Vault 標頭的 KDF 參數推導，並以標頭中的驗證段確認。
+3. 同步索引：下載 `index.enc`（若 Drive 修訂未變則略過），解密，更新本機索引快取。離線模式略過此步。
+4. 依名稱在索引中找到 Item ID，確認本機快取的該 Item 檔案修訂與索引一致，否則下載。
+5. 解密 Item 檔案，取出目前版本的私鑰，依要求格式轉換。
+6. 檢查狀態非 `revoked`（或已 `--force`）。
+7. 寫入目標檔案（`0600`）。
+8. 寫入本機操作紀錄並排程上傳 `log.enc`。
+9. zeroize 記憶體中的私鑰與 DEK。
 
-### 6.3 部署模式
+### 6.3 本機目錄
 
-| 模式 | 說明 |
+| 路徑 | 內容 | 權限 |
+|------|------|------|
+| `~/.config/hsm/config.yaml` | Vault 清單、各 Vault 的 Drive 資料夾 ID、預設 Vault、agent 逾時等設定 | 0600 |
+| `~/.config/hsm/device_id` | 本裝置識別碼（UUID） | 0600 |
+| `~/.cache/hsm/<vault_id>/` | `vault.hsm`、`index.enc`、`log.enc`、`items/*.enc` 的快取，以及 `sync_state.json`（各檔案已知修訂、pending 標記） | 0700 / 0600 |
+| OS 金鑰圈 | OAuth refresh token，鍵名 `hsm/<vault_id>/google` | 由系統管理 |
+
+Windows 對應路徑為 `%APPDATA%\hsm\` 與 `%LOCALAPPDATA%\hsm\cache\`。
+
+---
+
+## 7. Google Drive 整合
+
+### 7.1 OAuth client 與權限範圍
+
+- 工具使用「桌面應用程式」類型的 OAuth client。此類 client 的 client secret 依 Google 文件不視為機密，可隨程式發布。
+- 預設權限範圍：`drive.file`。此範圍下工具只能看到自己建立的檔案與資料夾。**影響**：若使用者指定的資料夾路徑已存在但由其他方式建立（例如使用者在網頁手動建立），工具看不到它，會建立一個同名的新資料夾。文件須明確說明此行為，並提供 `--scope full` 選項改用完整 `drive` 範圍（需重新授權）。
+- OAuth client 的提供方式見待決議 Q-02：由專案內建，或由使用者自行在 Google Cloud Console 建立並提供 client ID。
+
+### 7.2 資料夾解析與建立
+
+```
+輸入：folder_path（預設 "HolienSecretsManager"）
+1. 以 "/" 切割為 segments。
+2. parent = "root"。
+3. 對每個 segment：
+   a. 查詢：name = segment AND mimeType = folder AND parent in parents AND trashed = false。
+   b. 找到一個 → parent = 該資料夾 ID。
+   c. 找到多個 → 回報錯誤，要求使用者在 Drive 整理後重試（不自行猜測）。
+   d. 找不到 → 建立資料夾，parent = 新資料夾 ID。
+4. 最終 parent 即 Vault 資料夾。
+5. 檢查是否存在 vault.hsm：
+   - 存在 → 讀取並驗證格式；此為既有 Vault。
+   - 不存在且資料夾為空 → 建立新 Vault。
+   - 不存在但資料夾非空 → 詢問使用者是否仍在此建立新 Vault。
+6. 在資料夾上設定 appProperties：{ "hsm.vault_id": <uuid>, "hsm.format": "1" }，供日後快速辨識。
+```
+
+### 7.3 檔案配置
+
+| Drive 檔名 | 內容 | 是否加密 | 更新時機 |
+|------------|------|:--:|------|
+| `vault.hsm` | Vault 標頭：格式版本、vault_id、KDF 參數與 salt、KEK 驗證段、RK-wrapped KEK、建立時間 | 部分（見 8.1） | 建立、變更主密碼、更新復原金鑰 |
+| `index.enc` | 所有 Item 的摘要：id、名稱、型別、標籤、狀態、updated_at、目前版本號、到期日、綁定主機 | 是 | 任何 Item 新增、改名、改標籤、狀態變更 |
+| `log.enc` | 操作紀錄（滾動保留最近 5,000 筆） | 是 | 每次操作後（可批次延後上傳） |
+| `items/<item_id>.enc` | 單一 Item 的全部版本 | 是 | 該 Item 變更時 |
+| `hosts.enc` | 所有 Host 紀錄與綁定關係 | 是 | Host 變更時 |
+
+- `<item_id>` 為 UUID v4，與 Item 內容無關。
+- `items/` 為 Drive 子資料夾。
+- 所有檔案以 `multipart` 或 `resumable` 上傳；單檔小於 5 MB 用 multipart。
+- 上傳時帶 `appProperties`：`{ "hsm.kind": "item", "hsm.vault_id": ... }`，供 `list` 時以 query 過濾。
+
+### 7.4 修訂與衝突
+
+- 每次 `files.get` 記錄 `headRevisionId`，存於 `sync_state.json`。
+- 上傳前先 `files.get(fields=headRevisionId)` 比對；不一致即觸發 FR-SYNC-06 流程。此比對與上傳之間仍有競態視窗，接受此風險（個人使用情境下機率極低），且即使發生，Drive 修訂歷史仍保留被覆蓋的版本。
+- 工具不呼叫 `revisions.delete`；使用者若要清理可在 Drive 網頁操作。
+
+### 7.5 API 配額與錯誤處理
+
+| 狀況 | 處理 |
 |------|------|
-| 單機 | 單一程序 + SQLite，資料目錄需定期備份。適合第一階段。 |
-| 容器 | 官方 Docker 映像，資料目錄掛載 volume。 |
-| 多節點（第三階段） | 多個無狀態服務節點 + PostgreSQL，每個節點各自 Unseal。 |
+| HTTP 403 `rateLimitExceeded` / 429 | 指數退避：1s、2s、4s、8s、16s，最多 5 次 |
+| HTTP 5xx | 同上 |
+| HTTP 401 | 以 refresh token 更新 access token 後重試一次；仍失敗則要求重新授權 |
+| HTTP 404（檔案被使用者刪除） | 索引中標記該 Item 為 `missing`，`status` 顯示並建議從本機快取或 Drive 垃圾桶還原 |
+| 網路不可用 | 立即改為離線模式，寫入操作保留 pending |
+| Drive 空間不足 | 回報錯誤，保留 pending |
 
 ---
 
-## 7. 資料模型
+## 8. 資料格式
 
-以下為邏輯模型，實體欄位型別依選定資料庫調整。所有主鍵為 UUID v7，所有時間為 UTC。
+### 8.1 Vault 標頭 `vault.hsm`
 
-### 7.1 `users`
-
-| 欄位 | 型別 | 說明 |
-|------|------|------|
-| id | uuid | PK |
-| username | text | 唯一，3–64 字元 |
-| email | text | 唯一 |
-| password_hash | text | Argon2id 編碼字串 |
-| system_role | enum | `system_admin` / `user` |
-| mfa_enabled | bool | |
-| mfa_secret_enc | bytes | TOTP 秘密，以 KEK 直接加密 |
-| status | enum | `active` / `disabled` |
-| failed_login_count | int | |
-| locked_until | timestamp? | |
-| created_at / updated_at | timestamp | |
-
-### 7.2 `api_tokens`
-
-| 欄位 | 型別 | 說明 |
-|------|------|------|
-| id | uuid | PK |
-| user_id | uuid | FK users |
-| name | text | 使用者自訂名稱 |
-| token_hash | text | SHA-256 |
-| token_prefix | text | 前 8 字元，供辨識 |
-| vault_scope | uuid[] | 可存取的 Vault；空陣列代表繼承使用者全部權限 |
-| expires_at | timestamp? | |
-| last_used_at | timestamp? | |
-| revoked_at | timestamp? | |
-| created_at | timestamp | |
-
-### 7.3 `vaults`、`vault_members`
-
-`vaults`
-
-| 欄位 | 型別 | 說明 |
-|------|------|------|
-| id | uuid | PK |
-| name | text | 唯一 |
-| description | text | |
-| status | enum | `active` / `archived` |
-| created_by | uuid | FK users |
-| created_at / updated_at | timestamp | |
-
-`vault_members`
-
-| 欄位 | 型別 | 說明 |
-|------|------|------|
-| vault_id | uuid | FK，複合 PK |
-| user_id | uuid | FK，複合 PK |
-| role | enum | `owner` / `editor` / `reader` / `metadata_reader` |
-| granted_by | uuid | FK users |
-| created_at | timestamp | |
-
-### 7.4 `secrets`、`secret_versions`
-
-`secrets`（所有型別共用的 metadata）
-
-| 欄位 | 型別 | 說明 |
-|------|------|------|
-| id | uuid | PK |
-| vault_id | uuid | FK vaults |
-| type | enum | `credential` / `generic` / `key_pair` / `tls_certificate` |
-| name | text | 同一 Vault 內唯一 |
-| description | text | |
-| tags | text[] | |
-| current_version | int | |
-| expires_at | timestamp? | |
-| status | enum | `active` / `retired` / `revoked` / `deleted` |
-| revoked_reason | text? | |
-| created_by | uuid | |
-| created_at / updated_at / deleted_at | timestamp | |
-
-`secret_versions`
-
-| 欄位 | 型別 | 說明 |
-|------|------|------|
-| id | uuid | PK |
-| secret_id | uuid | FK secrets |
-| version | int | 從 1 遞增，與 secret_id 複合唯一 |
-| public_fields | jsonb | 非加密欄位（例如帳號、網址、公鑰、指紋） |
-| encrypted_fields | jsonb | `{ field_name: { ciphertext, nonce } }` |
-| wrapped_dek | bytes | |
-| kek_id | text | |
-| created_by | uuid | |
-| created_at | timestamp | |
-
-**各型別欄位定義**
-
-| type | public_fields | encrypted_fields |
-|------|---------------|------------------|
-| `credential` | `username`, `url` | `password`, `notes` |
-| `generic` | `keys`（欄位名稱列表） | 每個 key 一個項目，或單一 `content` |
-| `key_pair` | `algorithm`, `purpose`, `public_key_openssh`, `public_key_pem`, `fingerprint_sha256`, `fingerprint_md5`, `comment`, `has_passphrase` | `private_key_pem`（PKCS#8）, `passphrase` |
-| `tls_certificate` | `subject`, `sans`, `issuer`, `not_before`, `not_after`, `serial`, `certificate_pem`, `chain_pem`, `fingerprint_sha256` | `private_key_pem` |
-
-### 7.5 `hosts`、`host_keys`
-
-`hosts`
-
-| 欄位 | 型別 | 說明 |
-|------|------|------|
-| id | uuid | PK |
-| vault_id | uuid | FK，Host 隨所屬 Vault 控管權限 |
-| name | text | 同一 Vault 內唯一 |
-| address | text | IP 或 FQDN |
-| environment | enum | `prod` / `staging` / `dev` / `other` |
-| ssh_port | int | 預設 22 |
-| host_key_fingerprint | text? | FR-KEY-33 |
-| tags | text[] | |
-| notes | text | |
-| created_at / updated_at | timestamp | |
-
-`host_keys`
-
-| 欄位 | 型別 | 說明 |
-|------|------|------|
-| host_id | uuid | FK，複合 PK |
-| secret_id | uuid | FK secrets（type 須為 key_pair 或 tls_certificate），複合 PK |
-| remote_user | text | 伺服器端帳號，例如 `deploy` |
-| usage | text | 用途說明 |
-| created_by | uuid | |
-| created_at | timestamp | |
-
-### 7.6 `audit_logs`
-
-| 欄位 | 型別 | 說明 |
-|------|------|------|
-| id | uuid | PK（v7，時間有序） |
-| occurred_at | timestamp | |
-| principal_type | enum | `user` / `api_token` / `system` |
-| principal_id | uuid? | |
-| action | text | 例如 `secret.value.read`、`key.private.read`、`key.rotate` |
-| resource_type | text | `vault` / `secret` / `host` / `user` / `system` |
-| resource_id | uuid? | |
-| vault_id | uuid? | 冗餘欄位，加速查詢 |
-| result | enum | `success` / `denied` / `error` |
-| source_ip | inet | |
-| user_agent | text | |
-| details | jsonb | 例如 `{ "reason": "...", "version": 3, "format": "openssh" }` |
-| prev_hash / hash | bytes? | FR-AUDIT-07 雜湊鏈，第一版可為空 |
-
-### 7.7 `system_config`
-
-| 欄位 | 型別 | 說明 |
-|------|------|------|
-| key | text | PK |
-| value | jsonb | |
-
-保存：`kek_mode`、`kek_id`、Argon2 參數與 salt（passphrase 模式）、KEK 驗證用密文（用以確認 Unseal 輸入正確）、初始化完成旗標。
-
----
-
-## 8. API 規格
-
-### 8.1 通則
-
-- 基底路徑：`/api/v1`。
-- 認證：`Authorization: Bearer <token>`，Session Token 與 API Token 皆走此標頭。
-- 內容格式：`application/json; charset=utf-8`；私鑰與憑證匯出可以 `text/plain` 回傳。
-- 分頁：`?limit=50&cursor=<opaque>`，回應含 `next_cursor`。
-- 錯誤格式：
+JSON，明文可讀（不含機密）：
 
 ```json
 {
-  "error": {
-    "code": "FORBIDDEN",
-    "message": "insufficient role on vault",
-    "request_id": "01J..."
-  }
-}
-```
-
-- 錯誤碼清單見附錄 B。
-
-### 8.2 系統與認證
-
-| 方法 | 路徑 | 權限 | 說明 |
-|------|------|------|------|
-| GET | `/health` | 無 | 回傳 `{ status, sealed, version }` |
-| GET | `/metrics` | 設定決定 | Prometheus 指標（FR-SYS-05） |
-| POST | `/system/init` | 無（僅限未初始化） | 首次初始化 |
-| POST | `/system/unseal` | 無 | body：`{ passphrase }`（passphrase 模式） |
-| POST | `/system/seal` | system_admin | 手動進入 sealed 狀態 |
-| POST | `/auth/login` | 無 | body：`{ username, password }`；啟用 MFA 時回傳 `mfa_required` 與暫時 token |
-| POST | `/auth/mfa/verify` | 暫時 token | body：`{ code }` |
-| POST | `/auth/refresh` | Refresh Token | |
-| POST | `/auth/logout` | 已登入 | |
-| GET | `/me` | 已登入 | 目前 Principal 資訊 |
-| POST | `/me/mfa/enroll` | 已登入 | 回傳 TOTP 秘密與 QR 資料 |
-| POST | `/me/mfa/confirm` | 已登入 | 確認啟用 |
-| GET/POST | `/me/tokens` | 已登入 | 列出 / 建立 API Token |
-| DELETE | `/me/tokens/{id}` | 已登入 | 撤銷 |
-
-### 8.3 使用者管理（system_admin）
-
-| 方法 | 路徑 | 說明 |
-|------|------|------|
-| GET | `/users` | |
-| POST | `/users` | body：`{ username, email, password, system_role }` |
-| GET | `/users/{id}` | |
-| PATCH | `/users/{id}` | 修改 email、system_role、status |
-| POST | `/users/{id}/reset-password` | 產生一次性重設 |
-| POST | `/users/{id}/mfa/reset` | 清除 MFA |
-
-### 8.4 Vault
-
-| 方法 | 路徑 | 最低角色 | 說明 |
-|------|------|------|------|
-| GET | `/vaults` | 已登入 | 只列出有權限的 Vault |
-| POST | `/vaults` | 已登入 | |
-| GET | `/vaults/{id}` | metadata_reader | |
-| PATCH | `/vaults/{id}` | owner | |
-| DELETE | `/vaults/{id}` | owner | 需為空或已封存 |
-| GET | `/vaults/{id}/members` | metadata_reader | |
-| PUT | `/vaults/{id}/members/{user_id}` | owner | body：`{ role }` |
-| DELETE | `/vaults/{id}/members/{user_id}` | owner | 不可移除最後一位 owner |
-
-### 8.5 Secret（帳密與通用型）
-
-| 方法 | 路徑 | 最低角色 | 說明 |
-|------|------|------|------|
-| GET | `/vaults/{id}/secrets` | metadata_reader | 支援 `?type=&tag=&q=` |
-| POST | `/vaults/{id}/secrets` | editor | body 依型別，見下 |
-| GET | `/secrets/{id}` | metadata_reader | 只回 metadata 與 public_fields |
-| PATCH | `/secrets/{id}` | editor | 修改名稱、描述、標籤、到期日 |
-| PUT | `/secrets/{id}/value` | editor | 寫入新值，產生新版本 |
-| POST | `/secrets/{id}/value` | reader | **讀取機密值**，body：`{ version?, reason? }`，稽核 |
-| GET | `/secrets/{id}/versions` | metadata_reader | 版本列表（不含值） |
-| DELETE | `/secrets/{id}` | editor | 軟刪除 |
-
-建立 credential 範例：
-
-```json
-POST /api/v1/vaults/{id}/secrets
-{
-  "type": "credential",
-  "name": "prod-db-admin",
-  "tags": ["db", "prod"],
-  "fields": {
-    "username": "admin",
-    "password": "s3cr3t",
-    "url": "postgres://db.internal:5432",
-    "notes": "每季輪替"
+  "format": 1,
+  "vault_id": "0190a4c2-....",
+  "created_at": "2026-10-28T08:00:00Z",
+  "kdf": {
+    "algorithm": "argon2id",
+    "memory_kib": 262144,
+    "iterations": 3,
+    "parallelism": 4,
+    "salt": "<base64 32 bytes>"
   },
-  "expires_at": "2027-01-31T00:00:00Z"
+  "kek_check": {
+    "nonce": "<base64 12 bytes>",
+    "ciphertext": "<base64>"
+  },
+  "recovery": {
+    "enabled": true,
+    "hkdf_salt": "<base64 32 bytes>",
+    "nonce": "<base64 12 bytes>",
+    "wrapped_kek": "<base64>"
+  },
+  "devices": [
+    { "device_id": "...", "name": "macbook", "first_seen": "..." }
+  ]
 }
 ```
 
-### 8.6 金鑰對
+- `kek_check.ciphertext` 為字串 `"hsm-kek-check-v1"` 以 KEK 加密的結果，AAD 為 `vault_id`。
+- `devices` 清單僅供顯示，不用於授權。
 
-金鑰對本質是 `type=key_pair` 的 Secret，共用 8.5 的 metadata 端點，另提供專屬端點：
+### 8.2 加密檔案格式（`index.enc`、`items/*.enc`、`log.enc`、`hosts.enc`、備份檔）
 
-| 方法 | 路徑 | 最低角色 | 說明 |
+二進位格式，所有整數為 big-endian：
+
+| 偏移 | 長度 | 欄位 | 說明 |
 |------|------|------|------|
-| POST | `/vaults/{id}/keys/generate` | editor | body：`{ name, algorithm, purpose, comment?, passphrase?, tags?, expires_at? }` |
-| POST | `/vaults/{id}/keys/import` | editor | body：`{ name, private_key_pem, passphrase?, public_key?, purpose, ... }` |
-| POST | `/vaults/{id}/keys/import-public` | editor | 僅公鑰（FR-KEY-06） |
-| GET | `/keys/{id}/public` | metadata_reader | `?format=openssh\|pem`；可 `Accept: text/plain` |
-| POST | `/keys/{id}/private` | reader | **取用私鑰**，body：`{ reason, format: "openssh"\|"pkcs8"\|"pkcs1", version? }`，稽核 |
-| POST | `/keys/{id}/rotate` | editor | body：`{ reason?, comment? }`；回傳新版本 metadata |
-| POST | `/keys/{id}/revoke` | editor | body：`{ reason }` |
-| POST | `/keys/{id}/break-glass` | system_admin | body：`{ reason, ticket_ref? }`；取回 revoked 私鑰 |
-| GET | `/keys/{id}/hosts` | metadata_reader | 綁定的主機 |
-| GET | `/keys/by-fingerprint/{fp}` | 已登入 | 只回有權限的結果 |
+| 0 | 4 | magic | ASCII `HSM1` |
+| 4 | 1 | kind | 1 = index、2 = item、3 = log、4 = hosts、5 = backup |
+| 5 | 16 | vault_id | UUID bytes |
+| 21 | 16 | file_id | item_id；非 Item 檔案為固定 UUID |
+| 37 | 12 | dek_nonce | 包裝 DEK 用 |
+| 49 | 48 | wrapped_dek | 32 bytes DEK + 16 bytes GCM tag |
+| 97 | 12 | nonce | 內容加密用 |
+| 109 | 4 | plaintext_len | 解密後長度，供預先配置 |
+| 113 | n | ciphertext | 內容 + 16 bytes GCM tag |
 
-### 8.7 TLS 憑證
+- AAD = 偏移 0 到 108 的全部標頭 bytes。
+- 內容為 JSON，經 zstd 壓縮後再加密（壓縮於加密前，個人使用情境不考慮壓縮側通道）。
 
-| 方法 | 路徑 | 最低角色 | 說明 |
-|------|------|------|------|
-| POST | `/vaults/{id}/certificates/import` | editor | body：`{ name, certificate_pem, chain_pem?, private_key_pem, tags? }` |
-| GET | `/certificates/{id}/certificate` | metadata_reader | 回傳憑證與鏈 |
-| POST | `/certificates/{id}/private` | reader | 同金鑰取用規則 |
-| POST | `/certificates/{id}/renew` | editor | 以新憑證與私鑰建立新版本 |
-| GET | `/certificates/expiring` | 已登入 | `?within_days=30` |
+### 8.3 Item 內容（解密後 JSON）
 
-### 8.8 Host
+```json
+{
+  "id": "0190a4c2-....",
+  "type": "key_pair",
+  "name": "prod-web-01-deploy",
+  "tags": ["prod", "web"],
+  "status": "active",
+  "revoked_reason": null,
+  "expires_at": null,
+  "rotation_days": 90,
+  "created_at": "...",
+  "updated_at": "...",
+  "updated_by_device": "...",
+  "conflict": false,
+  "current_version": 2,
+  "versions": [
+    {
+      "version": 2,
+      "created_at": "...",
+      "created_by_device": "...",
+      "note": "rotated",
+      "fields": { "...型別專屬欄位..." }
+    },
+    { "version": 1, "...": "..." }
+  ]
+}
+```
 
-| 方法 | 路徑 | 最低角色 | 說明 |
-|------|------|------|------|
-| GET/POST | `/vaults/{id}/hosts` | metadata_reader / editor | |
-| GET/PATCH/DELETE | `/hosts/{id}` | metadata_reader / editor / editor | |
-| GET | `/hosts/{id}/keys` | metadata_reader | 綁定金鑰列表，含 remote_user |
-| PUT | `/hosts/{id}/keys/{secret_id}` | editor | body：`{ remote_user, usage }` |
-| DELETE | `/hosts/{id}/keys/{secret_id}` | editor | |
-| GET | `/hosts/{id}/authorized-keys` | metadata_reader | 輸出該 Host 所有 active 金鑰的 `authorized_keys` 內容（text/plain） |
+**各型別 `fields`**
 
-### 8.9 稽核
+| type | fields |
+|------|--------|
+| `credential` | `username`, `password`, `url`, `notes`, `totp_secret?` |
+| `generic` | `entries: { key: value }` 或 `content: string` |
+| `key_pair` | `algorithm`, `purpose`, `comment`, `private_key_pem`（PKCS#8）, `private_key_passphrase?`, `public_key_openssh`, `public_key_pem`, `fingerprint_sha256`, `fingerprint_md5` |
+| `tls_certificate` | `private_key_pem`, `certificate_pem`, `chain_pem?`, `subject`, `sans[]`, `issuer`, `not_before`, `not_after`, `serial`, `fingerprint_sha256` |
 
-| 方法 | 路徑 | 權限 | 說明 |
-|------|------|------|------|
-| GET | `/audit` | system_admin | `?from=&to=&principal_id=&action=&resource_id=&vault_id=` |
-| GET | `/vaults/{id}/audit` | owner | 該 Vault 範圍 |
-| GET | `/audit/export` | system_admin | `?format=jsonl\|csv` |
+### 8.4 索引內容
+
+```json
+{
+  "generated_at": "...",
+  "items": [
+    {
+      "id": "...", "type": "key_pair", "name": "prod-web-01-deploy",
+      "tags": ["prod"], "status": "active", "updated_at": "...",
+      "current_version": 2, "expires_at": null, "conflict": false,
+      "summary": { "fingerprint_sha256": "SHA256:...", "algorithm": "ed25519" }
+    }
+  ]
+}
+```
+
+- `summary` 只放非機密、常用於列表的欄位（帳密型放 `username` 與 `url`；金鑰型放指紋與演算法）。
+- 索引可由所有 Item 檔案重建。
+
+### 8.5 Hosts 內容
+
+```json
+{
+  "hosts": [
+    {
+      "id": "...", "name": "prod-web-01", "address": "203.0.113.10",
+      "ssh_port": 22, "environment": "prod", "tags": [], "notes": "",
+      "host_key_fingerprint": "SHA256:...",
+      "keys": [
+        { "item_id": "...", "remote_user": "deploy", "usage": "部署", "bound_at": "..." }
+      ],
+      "created_at": "...", "updated_at": "..."
+    }
+  ]
+}
+```
+
+### 8.6 操作紀錄內容
+
+每筆：`{ "at", "device_id", "action", "item_id?", "item_name?", "result", "details?" }`。`action` 例如 `item.create`、`item.update`、`key.export_private`、`key.rotate`、`key.revoke`、`sync.conflict`、`vault.password_change`。
 
 ---
 
-## 9. CLI 規格
+## 9. 介面規格
 
-### 9.1 基本
+### 9.1 桌面應用程式
 
-- 執行檔名稱：`hsm`（待決議，見第 13 章）。
-- 設定檔：`~/.config/hsm/config.yaml`，含 `server_url`；Token 存於作業系統金鑰圈（macOS Keychain / Linux Secret Service / Windows Credential Manager），無法使用時退回到 `0600` 權限的檔案並警告。
-- 環境變數：`HSM_SERVER`、`HSM_TOKEN` 優先於設定檔，供 CI 使用。
-- 輸出：預設人類可讀表格，`--json` 輸出 JSON。
-- 所有會讀取機密值的指令支援 `--reason`，若未提供且為互動終端則提示輸入。
+#### 9.1.1 畫面清單
 
-### 9.2 指令
+| 畫面 | 內容 | 優先 |
+|------|------|:--:|
+| 歡迎 / 初始化精靈 | 建立新 Vault 或連接既有 Vault；步驟：主密碼 → Google 授權 → Drive 資料夾 → 復原金鑰（顯示一次並要求確認） | P0 |
+| 解鎖 | 輸入主密碼；提供「使用復原金鑰」入口 | P0 |
+| 主視窗 | 左側分類（全部 / 帳密 / 金鑰 / 憑證 / 主機 / 垃圾桶）與標籤；中間列表（名稱、摘要、狀態、更新時間）；右側詳細面板；頂部搜尋框 | P0 |
+| 帳密詳細 | 帳號、密碼（遮罩 + 顯示 + 複製）、網址（可開啟）、備註、標籤、到期日、版本列表、TOTP 碼（P1） | P0 |
+| 金鑰詳細 | 演算法、指紋、公鑰（複製 / 另存）、狀態、版本列表、綁定主機；動作：匯出私鑰、安裝到 ~/.ssh、載入 ssh-agent（P1）、輪替、撤銷 | P0 |
+| 憑證詳細 | Subject、SAN、到期日、憑證鏈；動作：匯出、更新 | P0 |
+| 主機詳細 | 位址、環境、綁定金鑰清單（帳號、用途）；動作：綁定 / 解除、產生 authorized_keys | P0 |
+| 新增 / 編輯對話框 | 依型別切換欄位；密碼產生器內嵌 | P0 |
+| 金鑰產生對話框 | 名稱、演算法、用途、註解、passphrase | P0 |
+| 匯入精靈 | 來源選擇（Chrome CSV / Chrome 設定檔 / 其他密碼管理器 / 私鑰檔 / ~/.ssh 掃描）→ 預覽與勾選 → 匯入報告 | P0（Chrome 設定檔與其他管理器為 P1） |
+| 同步與狀態 | pending、衝突列表（逐筆比較、選擇保留）、到期與逾期輪替提醒、missing 項目 | P0 |
+| 設定 | 自動鎖定時間、剪貼簿清除秒數、Drive 資料夾資訊、Google 授權狀態與撤銷、變更主密碼、重新產生復原金鑰、語言 | P0 |
+| 操作紀錄 | 依時間、操作、Item 篩選 | P1 |
+| 系統匣選單 | 快速搜尋、鎖定、開啟主視窗、結束 | P1 |
+
+#### 9.1.2 行為規範
+
+- 任何顯示或複製機密值的動作都寫入操作紀錄。
+- 匯出私鑰一律以「另存新檔」對話框指定路徑，寫入後權限 `0600`；目標目錄為 world-readable 時警告。
+- 破壞性動作（撤銷、刪除、明文匯出、`--force` 匯出已撤銷私鑰）需二次確認，確認對話框需輸入 Item 名稱。
+- 視窗內不得出現可被螢幕截圖工具自動擷取的明文機密，除非使用者主動點擊「顯示」。
+- 未解決的衝突與逾期提醒以主視窗頂部橫幅提示，不彈出阻斷式對話框。
+
+### 9.2 CLI
+
+#### 9.2.1 基本
+
+- 執行檔名稱：`hsm`（待決議 Q-03）。
+- 全域選項：`--vault NAME`、`--offline`、`--json`、`--quiet`、`--config PATH`。
+- 環境變數：`HSM_VAULT`、`HSM_PASSWORD_FILE`（從檔案讀主密碼，供腳本使用，文件須警告風險）。
+- 輸出：預設人類可讀，`--json` 輸出 JSON 供腳本使用。
+- Item 以名稱參照；名稱在同一 Vault 內唯一。支援 `--id` 以 ID 參照。
+
+#### 9.2.2 指令
 
 ```
-hsm login [--server URL]
-hsm logout
-hsm whoami
-
+# 初始化與帳號
+hsm init [--drive-folder PATH] [--existing] [--no-recovery-key] [--scope file|full]
+hsm auth status
+hsm auth revoke
+hsm unlock                         # 啟動或喚醒 agent（P1）
+hsm lock
 hsm vault list
-hsm vault create <name> [--description TEXT]
-hsm vault member add <vault> <username> --role ROLE
-hsm vault member remove <vault> <username>
+hsm vault info
+hsm vault change-password
+hsm vault recovery regenerate
+hsm vault recovery unlock          # 以復原金鑰解鎖並重設主密碼
 
-hsm secret list <vault> [--type TYPE] [--tag TAG]
-hsm secret create <vault>/<name> --type credential --username U [--password P | --generate] [--url URL]
-hsm secret create <vault>/<name> --type generic --from-file PATH | --field k=v ...
-hsm secret get <vault>/<name> [--field password] [--version N] [--reason TEXT]
-hsm secret set <vault>/<name> --field password [--value V | --generate | --stdin]
-hsm secret versions <vault>/<name>
-hsm secret delete <vault>/<name>
+# 同步與狀態
+hsm sync [--rebuild-index]
+hsm status                         # pending、衝突、到期、逾期輪替、missing
+hsm resolve <name> --keep local|remote|<version>
+hsm verify
+hsm gc [--older-than 30d]
 
-hsm key generate <vault>/<name> [--algorithm ed25519|rsa-4096|rsa-2048|ecdsa-p256] [--purpose ssh|tls|signing|other] [--comment TEXT] [--passphrase]
-hsm key import <vault>/<name> --private-key PATH [--public-key PATH] [--purpose ...]
-hsm key import-public <vault>/<name> --public-key PATH
-hsm key show <vault>/<name>                     # metadata、公鑰、指紋、綁定主機
-hsm key public <vault>/<name> [--format openssh|pem] [--out PATH]
-hsm key private <vault>/<name> --reason TEXT [--format openssh|pkcs8|pkcs1] [--out PATH]   # 預設寫到檔案而非 stdout
-hsm key rotate <vault>/<name> [--reason TEXT]
-hsm key revoke <vault>/<name> --reason TEXT
+# 帳密與通用項目
+hsm list [--type TYPE] [--tag TAG] [--status S]
+hsm search <query>
+hsm add <name> --type credential [--username U] [--password P | --generate [--length N] | --stdin] [--url URL] [--tag T ...]
+hsm add <name> --type generic [--from-file PATH | --field k=v ...]
+hsm show <name> [--version N]      # 顯示非機密欄位與版本列表
+hsm get <name> [--field password] [--version N] [--copy | --stdout]
+hsm totp <name> [--copy]
+hsm edit <name> [--username U] [--password P | --generate | --stdin] [--url URL] [--notes N] [--expires DATE]
+hsm tag <name> [--add T] [--remove T]
+hsm rename <name> <new-name>
+hsm versions <name>
+hsm rm <name>
+hsm restore <name>                 # 從垃圾桶還原
+hsm generate-password [--length N] [--no-symbols] [--passphrase [--words N]]
+
+# 伺服器金鑰
+hsm key generate <name> [--algorithm ed25519|rsa-4096|rsa-2048|ecdsa-p256] [--purpose ssh|tls|signing|other] [--comment TEXT] [--passphrase] [--tag T ...]
+hsm key import <name> --private-key PATH [--public-key PATH] [--purpose ...]
+hsm key import --scan [--dir ~/.ssh]
+hsm key import-public <name> --public-key PATH
+hsm key show <name>                # metadata、公鑰、指紋、版本、綁定主機
+hsm key public <name> [--format openssh|pem] [--out PATH | --copy]
+hsm key private <name> [--format openssh|pkcs8|pkcs1] [--out PATH | --stdout] [--version N] [--force] [--strip-passphrase]
+hsm key install <name> [--dir ~/.ssh] [--ssh-config --host HOSTNAME]
+hsm key ssh-add <name> [--lifetime 1h]
+hsm key rotate <name> [--note TEXT]
+hsm key revoke <name> --reason TEXT
 hsm key find --fingerprint SHA256:...
 
-hsm cert import <vault>/<name> --cert PATH --key PATH [--chain PATH]
-hsm cert show <vault>/<name>
+# TLS 憑證
+hsm cert import <name> --cert PATH --key PATH [--chain PATH]
+hsm cert show <name>
+hsm cert export <name> [--cert-out PATH] [--key-out PATH] [--chain-out PATH]
+hsm cert renew <name> --cert PATH --key PATH [--chain PATH]
 hsm cert expiring [--within-days N]
 
-hsm host list <vault> [--env prod|staging|dev]
-hsm host add <vault>/<name> --address ADDR [--env ENV] [--port N]
-hsm host bind <vault>/<host> <vault>/<key> --remote-user USER [--usage TEXT]
-hsm host unbind <vault>/<host> <vault>/<key>
-hsm host keys <vault>/<host>
-hsm host authorized-keys <vault>/<host> [--out PATH]
+# 主機
+hsm host list [--env ENV]
+hsm host add <name> --address ADDR [--port N] [--env ENV] [--host-key-fingerprint FP]
+hsm host show <name>
+hsm host edit <name> [...]
+hsm host rm <name>
+hsm host bind <host> <key> --remote-user USER [--usage TEXT]
+hsm host unbind <host> <key>
+hsm host authorized-keys <host> [--out PATH]
 
-hsm token create --name NAME [--expires 90d] [--vault V ...]
-hsm token list
-hsm token revoke <id>
+# 備份與匯入匯出
+hsm export --encrypted --out PATH
+hsm export --plain --out PATH      # 二次確認
+hsm import --from PATH [--format hsm|chrome-csv|bitwarden|1password|keepass|firefox-csv|edge-csv] [--on-duplicate version|skip|new] [--dry-run]
+hsm import --chrome [--profile NAME] [--on-duplicate ...] [--dry-run]   # 直接讀取 Chrome 設定檔（P1）
 
-hsm audit list [--from T] [--to T] [--action A] [--vault V]
-
-hsm admin init
-hsm admin unseal
-hsm admin user create <username> --email E [--role system_admin|user]
-hsm admin backup --out PATH
-hsm admin restore --in PATH
-hsm admin rotate-kek
+# 紀錄
+hsm log [--since T] [--action A] [--item NAME] [--limit N]
 ```
 
-### 9.3 行為規範
+#### 9.2.3 行為規範
 
-- `hsm key private` 預設輸出到檔案（`--out`，未指定時為 `./<name>`），權限 `0600`；要輸出到 stdout 需明確加 `--stdout`，且在偵測到 stdout 為終端時再次確認。
-- 任何指令都不得將機密值寫入 shell history 以外的地方；文件應提醒使用者 `--password` 參數會留在 history，建議用 `--stdin` 或 `--generate`。
-- 非 0 結束碼：1 一般錯誤、2 參數錯誤、3 認證失敗、4 權限不足、5 服務 sealed。
+- `get`、`key private`、`cert export` 預設寫檔或複製到剪貼簿；輸出到 stdout 需明確 `--stdout`，且 stdout 為終端時再次確認。
+- `--password P` 之類在命令列直接帶機密的參數，文件須警告會留在 shell history，建議用 `--stdin` 或 `--generate`。
+- 所有需要主密碼的指令在非 TTY 且無 agent、無 `HSM_PASSWORD_FILE` 時，以結束碼 3 失敗。
+- 結束碼：0 成功、1 一般錯誤、2 參數錯誤、3 未解鎖或主密碼錯誤、4 Google 授權失效、5 網路或 Drive 錯誤、6 存在衝突需處理。
 
 ---
 
@@ -744,15 +761,16 @@ hsm admin rotate-kek
 
 | 類別 | 需求 |
 |------|------|
-| 效能 | 單機 SQLite 模式下，讀取機密值 P95 < 100 ms（不含網路）；金鑰產生 rsa-4096 < 3 s。 |
-| 容量 | 第一版目標：100 位使用者、50 個 Vault、10,000 個 Secret、100 萬筆稽核紀錄。 |
-| 可用性 | 單機模式不要求高可用；需在 5 分鐘內可由備份還原。 |
-| 備份 | 備份檔為加密資料庫快照，不含 KEK；還原後需以原 KEK Unseal。 |
-| 可觀測性 | 結構化日誌（JSON），日誌中絕不包含機密值、Token、密碼；Prometheus 指標。 |
-| 相容性 | 伺服器：Linux x86_64 / arm64。CLI：Linux、macOS、Windows。瀏覽器：近兩年主流版本。 |
-| 測試 | 加密層與授權層單元測試覆蓋率 ≥ 90%；每個 API 端點至少一個整合測試；金鑰匯入匯出需與 OpenSSH `ssh-keygen` 互通測試。 |
-| 安全驗證 | 發布前執行相依套件弱點掃描；私鑰取用端點需有「未寫入稽核即拒絕」的自動化測試。 |
-| 國際化 | 第一版 UI 與 CLI 訊息以繁體中文與英文雙語提供，預設依系統語系。 |
+| 效能 | 解鎖（Argon2id 推導）在一般筆電上 1–2 秒；已解鎖且索引已快取時，`get` 在 200 ms 內完成（不含 Drive 往返）；完整同步 500 個 Item 在 60 秒內完成。 |
+| 容量 | 目標：單一 Vault 2,000 個 Item、每 Item 10 版本、操作紀錄 5,000 筆；單次 Chrome 匯入 2,000 筆在 30 秒內完成預覽。 |
+| 可靠性 | 任何時刻程序被中斷（Ctrl-C、斷電）都不得造成已確認寫入的資料遺失；寫入快取採「寫暫存檔再 rename」。 |
+| 相容性 | Linux x86_64 / arm64、macOS（Intel / Apple Silicon）、Windows 10+。桌面應用程式以各平台原生安裝檔發布（`.dmg`、`.msi`、`.AppImage` / `.deb`）。 |
+| 互通性 | 匯出的 OpenSSH 金鑰需能被 `ssh-keygen -y`、`ssh-add` 正確讀取；PEM 需能被 `openssl` 讀取。 |
+| 測試 | 加密層與檔案格式單元測試覆蓋率 ≥ 90%；同步引擎以本機資料夾儲存層做整合測試，涵蓋衝突情境；金鑰匯入匯出與 OpenSSH / OpenSSL 做互通測試。 |
+| 相依性 | 不依賴專案方任何線上服務；除 Google Drive API 外不連線其他主機（含不做自動更新檢查，除非使用者明確啟用）。 |
+| 可觀測性 | `--verbose` 輸出 Drive API 呼叫摘要（方法、檔案 ID、狀態碼），永不輸出內容或 token。 |
+| 國際化 | CLI 訊息繁體中文與英文雙語，預設依系統語系，`HSM_LANG` 可覆寫。 |
+| 授權 | MIT。相依套件需為相容授權。 |
 
 ---
 
@@ -762,14 +780,17 @@ hsm admin rotate-kek
 
 | 層級 | 建議 | 理由 |
 |------|------|------|
-| 後端語言 | Go | 單一靜態二進位檔易部署；標準庫 `crypto` 完整，`golang.org/x/crypto/ssh` 可直接處理 OpenSSH 格式；記憶體控制較易做 zeroize。 |
-| 資料庫 | SQLite（第一階段）→ PostgreSQL（多節點） | 以 SQL 抽象層隔離，schema 遷移工具化。 |
-| 加密 | AES-256-GCM、Argon2id、ed25519 / RSA / ECDSA 皆用標準庫 | 避免自行實作密碼學。 |
-| Web UI | TypeScript + 輕量前端框架，建置後內嵌於後端 | 單一部署產物。 |
-| CLI | 與後端同語言、同 repo，共用 API client | 減少重複與行為差異。 |
-| 封裝 | 多平台二進位檔 + Docker 映像 | |
+| 語言 | Go | 單一靜態二進位檔，三平台交叉編譯簡單；標準庫 `crypto` 完整；`golang.org/x/crypto/ssh` 直接處理 OpenSSH 格式與 ssh-agent 協定；`argon2`、`hkdf` 皆有官方套件。 |
+| Google Drive | 官方 `google.golang.org/api/drive/v3` 與 `golang.org/x/oauth2` | 官方維護，支援 PKCE 與 loopback 流程。 |
+| 金鑰圈 | `zalando/go-keyring` 或等效 | 跨三平台。 |
+| 壓縮 | `klauspost/compress/zstd` | 純 Go 實作。 |
+| 桌面 GUI | Wails v2（Go 後端 + 網頁技術前端，使用系統 WebView） | 與 Core 同語言、單一執行檔、安裝檔小於 Electron；三平台皆支援系統匣。 |
+| 前端 | TypeScript + Svelte 或 React | 由團隊熟悉度決定。 |
+| CLI 框架 | `spf13/cobra` | 慣例成熟，自動產生說明與補全。 |
+| 剪貼簿 | Wails 內建 API（GUI）、`atotto/clipboard`（CLI） | 跨平台。 |
+| Chrome 匯入 | `modernc.org/sqlite`（純 Go，讀 `Login Data`）、`golang.org/x/crypto/pbkdf2`（macOS / Linux 金鑰推導）、DPAPI 透過 `golang.org/x/sys/windows` | 不需 cgo。 |
 
-替代方案：若團隊以 TypeScript / Node.js 為主，可改用 Node.js 後端，但需評估 OpenSSH 金鑰格式處理與記憶體 zeroize 的成熟度。
+替代方案：Rust + Tauri 在記憶體安全與 zeroize 上更嚴謹、安裝檔更小，但 Google API 與 ssh-agent 生態較薄；若團隊熟悉 Rust 可考慮。Electron 不建議，安裝檔過大且記憶體佔用高。
 
 ---
 
@@ -777,12 +798,12 @@ hsm admin rotate-kek
 
 | 階段 | 目標 | 主要交付 | 對應需求 |
 |------|------|----------|----------|
-| **Phase 0：確認** | 規格審閱、技術選型定案、repo 骨架 | 本文件 1.0、CI 流程、專案結構 | 第 13 章全部 |
-| **Phase 1：MVP** | 可自架、可用 CLI 完成所有核心操作 | 後端服務、CLI、SQLite、passphrase / file Unseal、本地帳號、Vault RBAC、帳密與通用 Secret、金鑰產生/匯入/取用/輪替/撤銷、Host 綁定、稽核、備份還原 | 所有 P0 |
-| **Phase 2：日常可用** | Web UI、安全強化、提醒 | Web UI、TOTP MFA、到期與輪替提醒、群組授權、稽核查詢匯出與 syslog 輸出、KEK 輪替、Prometheus、密碼產生器、指紋反查 | 所有 P1 |
-| **Phase 3：擴充** | 整合與規模化 | OIDC SSO、KMS 模式、PostgreSQL 多節點、Host 掃描與公鑰推送、附件型 Secret、PuTTY 匯出、稽核雜湊鏈 | P2 |
+| **Phase 0：確認** | 規格審閱、技術選型定案、建立 Google Cloud OAuth client、repo 骨架 | 本文件 1.0、CI 流程、專案結構、儲存層介面定義 | 第 13 章全部 |
+| **Phase 1：MVP** | 桌面應用程式在單一裝置可完整使用，第二裝置可連接同步 | Core：加密層與檔案格式、Vault 建立與解鎖、復原金鑰、Google 授權與資料夾建立、帳密與通用 Item、金鑰產生 / 匯入 / 掃描 / 匯出 / 安裝 / 輪替 / 撤銷、Host 綁定與 authorized_keys 輸出、同步與衝突、離線快取、加密備份匯出匯入、Chrome CSV 匯入、操作紀錄。GUI：9.1.1 所有 P0 畫面、自動鎖定、剪貼簿清除、拖放匯入 | 所有 P0 |
+| **Phase 2：日常順手** | CLI、減少摩擦、增加安全提醒 | CLI 與 agent、Chrome 設定檔直接讀取、其他密碼管理器匯入、變更主密碼、ssh-add、TOTP、到期與輪替提醒、指紋反查、verify、軟刪除垃圾桶、Drive 狀態顯示、系統匣、操作紀錄畫面 | 所有 P1 |
+| **Phase 3：擴充** | 進階整合 | 多 Vault、背景同步、Host 掃描與公鑰推送、附件型 Item、PuTTY 匯出、其他 Chromium 瀏覽器匯入、全域快捷鍵、其他儲存後端、檔案大小填充 | P2 |
 
-每階段結束條件：對應需求的自動化測試全部通過、安全檢查清單（第 5 章）逐項確認、文件更新。
+每階段結束條件：對應需求的自動化測試全部通過、第 5 章安全檢查逐項確認、使用文件更新。
 
 ---
 
@@ -790,16 +811,19 @@ hsm admin rotate-kek
 
 | 編號 | 問題 | 建議 | 影響 |
 |------|------|------|------|
-| Q-01 | 後端語言與框架 | Go（見第 11 章） | 全部 |
-| Q-02 | CLI 執行檔名稱：`hsm` 易與硬體安全模組混淆 | 改為 `holisec` 或 `hsecret` | 第 9 章 |
-| Q-03 | 第一版是否需要 Web UI，或僅 CLI | Web UI 排 Phase 2 | Phase 1 範圍 |
-| Q-04 | 預設 KEK 模式 | 單機用 `passphrase`，容器用 `file` | FR-SYS-01、5.2 |
-| Q-05 | 稽核紀錄保留期限與是否可清除 | 永久保留，只提供匯出歸檔 | FR-AUDIT-03 |
-| Q-06 | 是否需要 Secret 層級權限（比 Vault 更細） | Phase 2 再評估 | 3.2 |
-| Q-07 | 是否要在第一版就做 Host 的公鑰推送 | 否，只提供 `authorized-keys` 輸出 | FR-KEY-35 |
-| Q-08 | 公鑰是否允許匿名（未登入）讀取，供伺服器自動抓取 | 否，一律需 Token | FR-KEY-11 |
-| Q-09 | 版本保留數量與軟刪除保留期 | 10 版、30 天 | FR-CRED-02、FR-KEY-25 |
-| Q-10 | 部署目標環境（實體機、VM、K8s） | 需確認以決定 Phase 1 封裝方式 | 6.3 |
+| Q-01 | 實作語言 | Go（見第 11 章） | 全部 |
+| Q-02 | OAuth client 由誰提供：專案內建一組（需 Google 驗證流程，否則顯示「未經驗證的應用程式」警告且測試使用者上限 100 人），或由使用者自行建立 GCP 專案並提供 client ID | 第一版由使用者自行建立並以 `hsm init --client-id ... --client-secret ...` 提供；文件附步驟。若日後公開發布再申請驗證 | FR-DRIVE-01、7.1 |
+| Q-03 | 執行檔名稱：`hsm` 易與硬體安全模組混淆 | 改為 `holisec` 或 `hsecret` | 第 9 章、6.3 目錄名 |
+| Q-04 | 預設 OAuth 範圍 `drive.file` 造成「看不到使用者手動建立的同名資料夾」 | 維持 `drive.file` 為預設，提供 `--scope full` | 7.1、7.2 |
+| Q-05 | Drive 為唯一真實來源，或本機為主、Drive 為備份 | Drive 為真實來源（本文件採此設計），以支援多裝置 | 4.5 |
+| Q-06 | 介面優先順序：GUI 與 CLI 是否都在 Phase 1 | GUI 為 Phase 1，CLI 為 Phase 2（本文件採此安排）；若使用者日常以終端機操作金鑰為主，可對調 | 4.8、第 12 章 |
+| Q-12 | Chrome 設定檔直接讀取在 macOS 會觸發 Keychain 授權提示、在新版 Windows Chrome 幾乎不可行，是否值得投入 | 維持 P1；CSV 途徑為主要支援途徑 | 4.6.1 |
+| Q-13 | Chrome 匯入的重複項目預設處理方式 | 密碼不同時為既有 Item 新增版本 | FR-CHROME-04 |
+| Q-07 | 復原金鑰是否預設啟用 | 預設啟用，可用 `--no-recovery-key` 略過 | FR-INIT-04 |
+| Q-08 | Argon2id 參數（記憶體 256 MB 在低階裝置可能過慢） | 預設 256 MB，`init` 時可 `--kdf-memory` 調整，參數存於標頭 | 5.1 |
+| Q-09 | 版本保留數量與垃圾桶保留期 | 10 版、30 天 | FR-CRED-02、FR-KEY-25 |
+| Q-10 | 操作紀錄是否同步到 Drive，或只留本機 | 同步（可看到各裝置紀錄） | FR-LOG-02 |
+| Q-11 | 是否需要支援 Google Workspace 帳號的共用雲端硬碟（Shared Drive） | 第一版不支援，只用 My Drive | 7.2 |
 
 ---
 
@@ -807,29 +831,39 @@ hsm admin rotate-kek
 
 本文件在下列假設下撰寫，任一假設不成立時需修訂對應章節：
 
-1. 使用者為公司內部團隊，規模在 100 人以內；不需要多租戶（multi-tenant）。
-2. 系統部署於公司可控的環境，可自行管理 TLS 憑證與網路存取。
-3. 「伺服器 private + public key」主要指 SSH 金鑰與 TLS 私鑰，不含 PGP 金鑰與程式碼簽章金鑰（後兩者可用 `purpose=signing` 保存，但不提供專屬功能）。
+1. 使用者為單一個人；不需要與他人共享任何 Item。
+2. 使用者擁有個人 Google 帳號，且願意在 Google Cloud Console 建立 OAuth client（或接受專案內建 client 的未驗證警告）。
+3. 「伺服器 private + public key」主要指 SSH 金鑰與 TLS 私鑰；PGP 與程式碼簽章金鑰可用 `purpose=signing` 保存，但不提供專屬功能。
 4. 系統不負責簽發憑證，只保管。
-5. 第一版不需要與既有身分系統整合，使用本地帳號。
-6. 文件與介面以繁體中文為主、英文為輔。
+5. 使用者的電腦可視為可信環境；本工具不防禦本機惡意軟體。
+6. 使用者在多台裝置上使用同一 Google 帳號與同一主密碼。
+7. 產品為單機桌面應用程式，第一版主要介面為圖形介面；CLI 為輔助。
+8. 文件與介面以繁體中文為主、英文為輔。
+9. 使用者的 Chrome 資料為個人所有，匯入只讀取本機設定檔或使用者自行匯出的 CSV，不接觸 Google 帳號的密碼同步服務。
 
-## 附錄 B：錯誤碼
+## 附錄 B：錯誤與結束碼
 
-| HTTP | code | 說明 |
-|------|------|------|
-| 400 | `INVALID_REQUEST` | 參數格式錯誤 |
-| 400 | `INVALID_KEY_MATERIAL` | 私鑰 / 憑證格式無法解析或不匹配 |
-| 400 | `REASON_REQUIRED` | 取用私鑰未提供原因 |
-| 401 | `UNAUTHENTICATED` | Token 無效或過期 |
-| 401 | `MFA_REQUIRED` | 需完成 MFA |
-| 403 | `FORBIDDEN` | 角色不足或 Token 範圍不含該 Vault |
-| 403 | `KEY_REVOKED` | 金鑰已撤銷，不可取用 |
-| 404 | `NOT_FOUND` | 資源不存在或無權限得知其存在 |
-| 409 | `CONFLICT` | 名稱重複、Vault 非空等 |
-| 409 | `LAST_OWNER` | 不可移除最後一位 owner |
-| 423 | `ACCOUNT_LOCKED` | 登入失敗次數過多 |
-| 429 | `RATE_LIMITED` | 速率限制 |
-| 500 | `AUDIT_WRITE_FAILED` | 稽核寫入失敗，操作已中止 |
-| 503 | `SEALED` | 服務尚未 Unseal |
-| 503 | `NOT_INITIALIZED` | 尚未完成初始化 |
+| 結束碼 | 錯誤代碼 | 說明 |
+|:--:|------|------|
+| 1 | `INTERNAL` | 未預期錯誤 |
+| 1 | `NOT_FOUND` | Item / Host 不存在 |
+| 1 | `CONFLICT_NAME` | 名稱重複 |
+| 1 | `KEY_REVOKED` | 金鑰已撤銷，需 `--force` |
+| 1 | `INVALID_KEY_MATERIAL` | 私鑰 / 憑證無法解析或不匹配 |
+| 1 | `CORRUPTED` | 檔案格式錯誤或 GCM 驗證失敗 |
+| 1 | `UNSAFE_PATH` | 目標目錄權限不安全 |
+| 1 | `IMPORT_PARSE` | 匯入檔案格式無法解析 |
+| 1 | `CHROME_PROFILE_NOT_FOUND` | 找不到 Chrome 設定檔 |
+| 1 | `CHROME_KEY_UNAVAILABLE` | 無法取得 Chrome 密碼加密金鑰，請改用 CSV 途徑 |
+| 1 | `CHROME_APP_BOUND` | Chrome 使用 App-Bound Encryption，無法直接讀取，請改用 CSV 途徑 |
+| 2 | `INVALID_ARGS` | 參數錯誤 |
+| 3 | `LOCKED` | 需要主密碼但無法取得 |
+| 3 | `BAD_PASSWORD` | 主密碼或復原金鑰錯誤 |
+| 3 | `NOT_INITIALIZED` | 尚未執行 `init` |
+| 4 | `AUTH_REQUIRED` | Google 授權不存在或已失效 |
+| 4 | `AUTH_SCOPE` | 目前授權範圍不足以執行此操作 |
+| 5 | `DRIVE_ERROR` | Drive API 錯誤（重試後仍失敗） |
+| 5 | `DRIVE_QUOTA` | Drive 空間不足 |
+| 5 | `OFFLINE` | 需要網路但不可用，且無 `--offline` |
+| 5 | `FOLDER_AMBIGUOUS` | 資料夾路徑對應到多個同名資料夾 |
+| 6 | `CONFLICT_PENDING` | 存在未解決的同步衝突 |
