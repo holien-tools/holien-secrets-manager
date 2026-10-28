@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |------|------|
-| 文件版本 | 0.5.0（草稿） |
+| 文件版本 | 0.6.0（草稿） |
 | 狀態 | 待審閱 |
 | 最後更新 | 2026-10-28 |
 | 適用範圍 | 全專案（單機桌面應用程式、CLI、Google Drive 儲存層） |
@@ -16,6 +16,8 @@
 > 0.4.0 版變更：Drive 上的**資料夾名稱與所有檔案名稱皆由使用者自訂**，系統只提供預設值；檔案辨識改以 Drive 檔案屬性為準，不依賴檔名。
 >
 > 0.5.0 版變更：新增 5.1.1 至 5.1.6，逐步說明存放檔案的**加密與解密流程**、金鑰推導、主密碼變更與復原。
+>
+> 0.6.0 版變更（依外部審閱意見）：改為**三層金鑰結構**（主密碼與復原金鑰各自包裝同一把 Vault Key），修正改密碼會使復原金鑰失效的矛盾；「變更主密碼」與「全面輪替金鑰」分為兩種操作，後者採世代與明確提交點；備份檔改為**可獨立解鎖**的格式；統一加密檔案格式並對長度與 KDF 參數設硬性上限；同步改為**每次寫入產生不可覆寫的新版本**並偵測分支與回滾；Windows 改以 ACL 保護檔案；新增 GUI 與 agent 強化、CLI 移除命令列明文密碼、金鑰版本與主機部署狀態分離；縮小第一版範圍並加入復原導向的驗收測試。
 
 ---
 
@@ -95,11 +97,15 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
 | Host（主機） | 一台伺服器的紀錄，可與多把金鑰綁定。 |
 | Vault（保險庫） | 一份完整資料集，對應 Google Drive 上的一個資料夾。一位使用者通常只有一個 Vault，但允許多個（例如工作與個人分開）。 |
 | Version（版本） | Item 的值每次變更即產生一個新版本，舊版本保留供回溯。 |
-| Master Password（主密碼） | 使用者記憶的唯一密碼，用於推導 KEK。遺失即無法解密資料。 |
-| Recovery Key（復原金鑰） | 建立 Vault 時產生的隨機金鑰，可在遺忘主密碼時解鎖 Vault。選用。 |
-| KEK | Key Encryption Key，由主密碼推導的 256-bit 金鑰，用於包裝 DEK。 |
-| DEK | Data Encryption Key，每個 Item 檔案一把的隨機 256-bit 金鑰，用於實際加密內容。 |
-| Lock / Unlock | 本機尚未載入 KEK 的狀態為 locked；輸入主密碼推導出 KEK 後為 unlocked。 |
+| Master Password（主密碼） | 使用者記憶的唯一密碼，用於推導 PK。主密碼與復原金鑰皆遺失即無法解密資料。 |
+| Recovery Key（復原金鑰） | 建立 Vault 時產生的隨機金鑰，可在遺忘主密碼時解開 VK。選用但預設啟用。 |
+| PK | Password Key，由主密碼經 Argon2id 推導的 256-bit 金鑰，只用來包裝 VK。 |
+| RK_key | 由復原金鑰經 HKDF 推導的 256-bit 金鑰，只用來包裝 VK。 |
+| VK | Vault Key，建立 Vault 時隨機產生的 256-bit 金鑰，平常不變，用於包裝每個檔案的 DEK。主密碼與復原金鑰各自包裝同一把 VK。 |
+| DEK | Data Encryption Key，每個檔案版本一把的隨機 256-bit 金鑰，用於實際加密內容。 |
+| 金鑰世代（Generation） | VK 的版本號。只有「全面輪替」會產生新世代；變更主密碼不會。 |
+| Rev（修訂） | 一個檔案的一次寫入。每次寫入都在 Drive 上建立新檔案，舊修訂不被覆寫；修訂以 `parent_rev` 串成鏈。 |
+| Lock / Unlock | 本機尚未載入 VK 的狀態為 locked；輸入主密碼解開 VK 後為 unlocked。 |
 | Drive Folder（Drive 資料夾） | Google Drive 上存放此 Vault 所有檔案的資料夾。名稱由使用者自訂，預設 `HolienSecretsManager`。 |
 | Naming Scheme（命名規則） | 此 Vault 在 Drive 上各類檔案的名稱設定，存於 Vault 標頭，所有裝置共用。 |
 | Device（裝置） | 執行 HSM 的一台電腦。每台裝置有獨立的 device_id，用於同步與衝突判斷。 |
@@ -139,9 +145,11 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
 | FR-INIT-03 | P0 | 支援在新裝置以 `init --existing` 連接既有 Vault：授權 Google、找到 Drive 資料夾、下載 Vault 標頭、驗證主密碼、同步。 |
 | FR-INIT-04 | P0 | 建立 Vault 時產生復原金鑰（256-bit，以 Base32 分組顯示，共 52 字元），只顯示一次，並要求使用者確認已保存。使用者可選擇略過，略過時明確警告遺忘主密碼即無法復原。 |
 | FR-INIT-05 | P0 | 解鎖：執行需要讀寫機密的指令時提示輸入主密碼；輸入錯誤回傳明確錯誤且不洩漏任何資料。 |
-| FR-INIT-06 | P1 | 解鎖狀態維持：啟動本機 agent 程序在記憶體中保存 KEK，逾時（預設 15 分鐘，可設定）或執行 `lock` 後清除，期間指令不需重複輸入主密碼。 |
-| FR-INIT-07 | P1 | 變更主密碼：重新推導 KEK、重新包裝所有 Item 的 DEK、更新 Vault 標頭並上傳。過程中任一步失敗須可回復到原狀態。 |
-| FR-INIT-08 | P1 | 以復原金鑰解鎖並重設主密碼。 |
+| FR-INIT-06 | P1 | 解鎖狀態維持：啟動本機 agent 程序在記憶體中保存 VK，逾時（預設 15 分鐘，可設定）或執行 `lock` 後清除，期間指令不需重複輸入主密碼。agent 的安全要求見 5.6。 |
+| FR-INIT-07 | P0 | 變更主密碼：只重新包裝 VK 並寫入一次標頭，不碰任何資料檔；復原金鑰不受影響。流程見 5.1.5。 |
+| FR-INIT-08 | P0 | 以復原金鑰解開 VK 並設定新主密碼；流程同 FR-INIT-07，只是 VK 來源不同。 |
+| FR-INIT-10 | P1 | 全面輪替金鑰（懷疑 VK 或主密碼外洩時）：產生新世代 VK，所有檔案以新 DEK 重新加密。採世代與明確提交點，可中斷續行。流程見 5.1.6。 |
+| FR-INIT-11 | P0 | 標頭中的 KDF 參數在執行前須通過硬性上限檢查（記憶體 ≤ 1 GiB、迭代 ≤ 16、並行 ≤ 16），超過即拒絕並回報 `KDF_PARAMS_UNSAFE`，不執行推導。 |
 | FR-INIT-09 | P2 | 支援多個 Vault（例如 `--vault work`），各自對應不同 Drive 資料夾，可使用不同 Google 帳號。 |
 
 ### 4.2 Google Drive 儲存（DRIVE）
@@ -159,11 +167,11 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
 | FR-DRIVE-15 | P0 | 檔名驗證：不得為空、不得含 `/`、長度不超過 200 字元、同一 Vault 內各類檔名不得相同、Item 檔名樣式必須含 `{id}`。不限制副檔名，允許使用者刻意用 `.txt`、`.jpg` 等名稱。 |
 | FR-DRIVE-16 | P1 | 事後修改命名規則：於設定畫面修改後，工具更新 Vault 標頭並逐一以 `files.update` 重新命名 Drive 上的檔案；中途失敗可重試，重試時以 `appProperties` 找到檔案，不受已改名或未改名影響。 |
 | FR-DRIVE-17 | P1 | 事後搬移資料夾：可指定新的資料夾路徑，工具以 `files.update` 變更資料夾的 parent，不重新上傳內容。 |
-| FR-DRIVE-06 | P0 | OAuth refresh token 存於作業系統金鑰圈（macOS Keychain / Linux Secret Service / Windows Credential Manager）；無金鑰圈時以 KEK 加密後存於本機設定目錄。 |
+| FR-DRIVE-06 | P0 | OAuth refresh token 存於作業系統金鑰圈（macOS Keychain / Linux Secret Service / Windows Credential Manager）；無金鑰圈時以 VK 加密後存於本機設定目錄。 |
 | FR-DRIVE-07 | P0 | 處理 Drive API 的速率限制與暫時性錯誤：指數退避重試（最多 5 次），超過後回報明確錯誤並保留本機變更待下次同步。 |
 | FR-DRIVE-08 | P0 | 撤銷授權：`auth revoke` 向 Google 撤銷 token 並清除本機 token；不刪除 Drive 上的檔案。 |
 | FR-DRIVE-09 | P1 | 顯示 Drive 資料夾狀態：Item 數、總大小、最後同步時間、Drive 剩餘空間。 |
-| FR-DRIVE-10 | P1 | 以 Drive 的檔案修訂（revision）作為額外安全網；工具不主動刪除修訂。 |
+| FR-DRIVE-10 | P0 | 不依賴 Google Drive 的檔案修訂歷史做資料保護（Google 不保證保留未設 `keepForever` 的舊修訂）。資料檔一律不就地覆寫，每次寫入建立新檔案，見 4.5 與 7.4。 |
 | FR-DRIVE-11 | P2 | 儲存層抽象：定義 `Storage` 介面（list / get / put / delete / rename / revision），以便日後支援本機資料夾、S3 等後端。 |
 
 ### 4.3 帳密管理（CRED）
@@ -201,21 +209,25 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
 | 編號 | 優先 | 需求 |
 |------|:--:|------|
 | FR-KEY-10 | P0 | 公鑰與指紋（SHA256 與 MD5 兩種格式）可直接顯示，不需額外確認。 |
-| FR-KEY-11 | P0 | 私鑰匯出預設寫入檔案，權限 `0600`；要輸出到 stdout 需明確加 `--stdout`，且偵測到 stdout 為終端時再次確認。 |
+| FR-KEY-11 | P0 | 私鑰匯出預設寫入檔案，以「建立時即為僅本人可讀」的方式建立（Unix `0600`、Windows 僅本人 ACL，見 5.3），絕不先寫明文再收緊權限；要輸出到 stdout 需明確加 `--stdout`，且偵測到 stdout 為終端時再次確認。預設只匯出 `active` 版本。 |
 | FR-KEY-12 | P0 | 私鑰可以 OpenSSH、PEM（PKCS#1 / PKCS#8）格式匯出；格式轉換於記憶體內完成。 |
 | FR-KEY-13 | P0 | 公鑰可以 OpenSSH `authorized_keys` 單行格式、PEM 格式輸出。 |
-| FR-KEY-14 | P0 | `key install`：將私鑰與公鑰寫入 `~/.ssh/<name>` 與 `~/.ssh/<name>.pub`，並可選擇在 `~/.ssh/config` 追加對應 Host 區塊。 |
+| FR-KEY-14 | P1 | `key install`：將私鑰與公鑰寫入 `~/.ssh/<name>` 與 `~/.ssh/<name>.pub`，並可選擇在 `~/.ssh/config` 追加對應 Host 區塊。第一版以匯出到使用者指定路徑（FR-KEY-11）為主。 |
 | FR-KEY-15 | P1 | `key ssh-add`：直接將私鑰載入執行中的 ssh-agent，不寫入磁碟；可設定存活時間。 |
 | FR-KEY-16 | P1 | 以指紋反查金鑰（用於從伺服器 `authorized_keys` 盤點）。 |
 | FR-KEY-17 | P2 | 支援 PuTTY `.ppk` 格式匯出。 |
 
 #### 4.4.3 生命週期
 
+狀態是**每個金鑰版本各自一個**，不是整個 Item 一個。Item 層級只有衍生的摘要（有任一 `active` 版本即視為 active）。
+
 | 編號 | 優先 | 需求 |
 |------|:--:|------|
-| FR-KEY-20 | P0 | 金鑰狀態：`active`、`retired`（已輪替，仍可讀取）、`revoked`（已撤銷，預設不可匯出私鑰）。 |
-| FR-KEY-21 | P0 | 輪替（rotate）：以相同演算法與設定產生新金鑰版本，舊版本自動轉為 `retired`。新舊並存，供使用者完成伺服器端更換；`key show` 列出所有版本與各自指紋。 |
-| FR-KEY-22 | P0 | 撤銷（revoke）：需填寫原因；撤銷後私鑰預設不可匯出，需加 `--force` 並再次確認。 |
+| FR-KEY-20 | P0 | 每個金鑰版本有獨立狀態：`active`、`retired`（已被新版本取代，仍可讀取）、`revoked`（已撤銷，預設不可匯出）。狀態只能單向前進：active → retired → revoked，或 active → revoked。 |
+| FR-KEY-21 | P0 | 輪替（rotate）：以相同演算法與設定產生新版本並設為 `active`，原 active 版本自動轉為 `retired`。`key show` 列出所有版本、各自狀態與指紋。 |
+| FR-KEY-22 | P0 | 撤銷（revoke）：可指定版本或全部版本，需填寫原因。撤銷後該版本私鑰預設不可匯出、不可安裝、不出現在 `authorized-keys` 輸出；需加 `--force` 並再次確認才可匯出。 |
+| FR-KEY-26 | P0 | 匯出、安裝、載入 agent 預設只針對 `active` 版本；要操作 `retired` 版本必須明確指定 `--version N` 並顯示警告。 |
+| FR-KEY-27 | P0 | **撤銷是本機標記，不代表伺服器已移除授權。** 介面與文件必須明確區分「本工具已標記撤銷」與「伺服器端已移除」；後者由主機綁定的部署狀態記錄（FR-KEY-37）。 |
 | FR-KEY-23 | P1 | 可設定金鑰到期日；TLS 憑證自動以憑證到期日為準。`status` 指令列出 30 / 14 / 7 天內到期項目。 |
 | FR-KEY-24 | P1 | 可設定輪替政策（例如每 90 天），`status` 指令列出逾期未輪替的金鑰；不自動執行輪替。 |
 | FR-KEY-25 | P1 | 刪除金鑰採軟刪除，進入垃圾桶，保留期（預設 30 天）後由 `gc` 指令永久清除。 |
@@ -225,33 +237,47 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
 | 編號 | 優先 | 需求 |
 |------|:--:|------|
 | FR-KEY-30 | P0 | 建立 Host 紀錄：名稱、位址（IP 或 FQDN）、SSH 連接埠、環境（`prod`/`staging`/`dev`/`other`）、備註、標籤。 |
-| FR-KEY-31 | P0 | 一把金鑰可綁定多台 Host，一台 Host 可綁定多把金鑰；綁定時記錄伺服器端帳號（例如 `root`、`deploy`）與用途。 |
-| FR-KEY-32 | P0 | 可列出某台 Host 所有綁定的金鑰，及某把金鑰綁定的所有 Host。 |
-| FR-KEY-33 | P0 | `host authorized-keys`：輸出該 Host 所有 active 金鑰的 `authorized_keys` 內容。 |
+| FR-KEY-31 | P0 | 綁定以「Host × 金鑰版本 × 伺服器端帳號」為單位。一把金鑰的不同版本可分別綁定；綁定時記錄伺服器端帳號（例如 `root`、`deploy`）與用途。 |
+| FR-KEY-32 | P0 | 可列出某台 Host 所有綁定，及某把金鑰（含各版本）綁定的所有 Host。 |
+| FR-KEY-33 | P0 | `host authorized-keys`：只輸出該 Host 綁定中、版本為 `active` 的公鑰；若存在 `retired` 或 `revoked` 版本仍標記為已安裝，輸出時以註解與警告列出，提醒使用者到伺服器移除。 |
+| FR-KEY-37 | P0 | 每個綁定有部署狀態：`declared`（已登記，尚未確認安裝）、`installed`（使用者確認已放到伺服器）、`removal_pending`（該版本已 retired 或 revoked，但伺服器尚未移除）、`removed`（使用者確認已從伺服器移除）。狀態由使用者手動更新；輪替或撤銷時工具自動把受影響的 `installed` 綁定改為 `removal_pending`。 |
+| FR-KEY-38 | P0 | `status` 列出所有 `removal_pending` 綁定，顯示主機、帳號、金鑰版本與指紋，作為「伺服器端待處理清單」。 |
 | FR-KEY-34 | P1 | 可記錄 Host 的 SSH host key 指紋；`key install` 寫入 `~/.ssh/config` 時一併產生 `known_hosts` 行。 |
-| FR-KEY-35 | P2 | 透過 SSH 連線到 Host 讀取 `authorized_keys`，與紀錄比對並回報差異（唯讀）。 |
+| FR-KEY-35 | P2 | 透過 SSH 連線到 Host 讀取 `authorized_keys`，與紀錄比對並回報差異（唯讀），並可據此把 `removal_pending` 自動更新為 `removed`。 |
 | FR-KEY-36 | P2 | 透過 SSH 將公鑰推送到 Host 的 `authorized_keys`（需二次確認）。 |
 
 ### 4.5 同步與離線（SYNC）
 
+設計原則：**先保存，再判斷**。每次寫入都先成為 Drive 上一個獨立、不會被覆寫的修訂（rev），衝突與分支是在修訂鏈上事後偵測，不靠「先查再寫」的時間窗。
+
 | 編號 | 優先 | 需求 |
 |------|:--:|------|
 | FR-SYNC-01 | P0 | Google Drive 為資料的唯一真實來源（source of truth）；本機保有完整的加密快取，內容與 Drive 上的密文相同。 |
-| FR-SYNC-02 | P0 | 寫入操作：先寫本機快取並標記 `pending`，再上傳；上傳成功後清除標記。任何時刻中斷都不會造成資料遺失。 |
+| FR-SYNC-02 | P0 | 寫入操作：先寫本機快取並標記 `pending`，再上傳；上傳成功後清除標記。任何時刻中斷都不會造成已確認寫入的資料遺失。 |
 | FR-SYNC-03 | P0 | 讀取操作：預設先同步索引（輕量），再讀取本機快取；`--offline` 時完全不連網。 |
-| FR-SYNC-04 | P0 | 每個 Item 為獨立檔案，衝突範圍限縮在單一 Item。 |
-| FR-SYNC-05 | P0 | 衝突偵測：上傳前比對 Drive 上該檔案的 `headRevisionId` 與本機記錄的已知修訂；不一致即為衝突。 |
-| FR-SYNC-06 | P0 | 衝突處理：下載遠端版本，將遠端與本機的變更都保留為版本，以 `updated_at` 較新者為目前版本，並在 Item 上標記 `conflict`；`status` 指令列出待處理衝突，`resolve` 指令由使用者選擇保留哪個版本。 |
-| FR-SYNC-07 | P0 | 索引檔（index）可由全部 Item 檔案重建（`sync --rebuild-index`），索引損毀不會造成資料遺失。 |
-| FR-SYNC-08 | P1 | 顯示同步狀態：pending 上傳數、最後同步時間、衝突數。 |
-| FR-SYNC-09 | P2 | 背景同步：agent 程序定期（預設 5 分鐘）同步索引並上傳 pending 項目。 |
+| FR-SYNC-04 | P0 | 每個 Item 為獨立的邏輯檔案（`file_id`），衝突範圍限縮在單一 Item。 |
+| FR-SYNC-05 | P0 | **不可覆寫的修訂**：每次寫入 index、hosts、log、Item 或標頭，都在 Drive 建立一個新檔案（新的 Drive 檔案 ID），帶 `rev`（隨機 UUID）與 `parent_rev`（寫入時本機所知的最新 rev）。工具從不呼叫 `files.update` 修改資料檔內容。 |
+| FR-SYNC-06 | P0 | 分支偵測：同步時列出同一 `file_id` 的所有修訂，以 `parent_rev` 建鏈；恰有一個鏈尾（head）為正常；多於一個 head 即為分支（衝突）。 |
+| FR-SYNC-07 | P0 | 分支處理依檔案類型：索引由全部 Item 重建後自動合併；操作紀錄取聯集自動合併；Item 與 hosts 的分支若解密後內容完全相同則自動合併，否則標記 `conflict` 交由使用者處理，**不以時間戳自動決定**。 |
+| FR-SYNC-08 | P0 | 涉及撤銷、刪除、金鑰輪替、狀態變更的分支一律由使用者處理；解決時產生一個新修訂，`merge_parents` 列出所有被合併的 head，使它們都成為祖先。 |
+| FR-SYNC-09 | P0 | 衝突介面逐欄位並排顯示兩個 head 的差異（機密值遮罩，可展開），使用者可選擇其一或逐欄位挑選；未解決前該 Item 仍可讀取（以較新 head 顯示並加警示），但不可寫入。 |
+| FR-SYNC-10 | P0 | 回滾防護：每台裝置在 `sync_state.json` 記錄每個 `file_id` 最後信任的 head（rev、SHA-256、金鑰世代）。同步時若 Drive 上的 head 鏈不包含該信任 rev，視為疑似回滾，回報 `ROLLBACK_SUSPECTED` 並停止寫入，需使用者確認後才接受新鏈。 |
+| FR-SYNC-11 | P0 | 回滾防護的已知限制：全新裝置第一次同步沒有獨立的信任紀錄，無法辨識整份資料是否已被換回舊版本。文件須寫明；緩解方式為 GUI 顯示索引摘要雜湊與最後修訂時間，使用者可與另一台裝置或備份檔人工比對。 |
+| FR-SYNC-12 | P0 | 修訂保留：每個 `file_id` 至少保留最近 20 個修訂且所有 30 天內的修訂（可設定）；`gc` 只刪除更舊的非 head、非信任點、未被未解決衝突引用的修訂。 |
+| FR-SYNC-13 | P0 | 索引檔可由全部 Item 的 head 重建（`sync --rebuild-index`），索引損毀或分支不會造成資料遺失。 |
+| FR-SYNC-14 | P0 | 每次寫入前讀取標頭的 head，確認本機所持 VK 世代為目前有效世代；若標頭已進入新世代或輪替中，先更新再寫，否則拒絕寫入（`REKEY_IN_PROGRESS` / `STALE_GENERATION`）。 |
+| FR-SYNC-15 | P1 | 顯示同步狀態：pending 上傳數、最後同步時間、衝突數、各檔案修訂數。 |
+| FR-SYNC-16 | P2 | 背景同步：agent 程序定期（預設 5 分鐘）同步索引並上傳 pending 項目。 |
 
 ### 4.6 備份與匯入匯出（BACKUP）
 
 | 編號 | 優先 | 需求 |
 |------|:--:|------|
-| FR-BAK-01 | P0 | `export --encrypted`：將整個 Vault（標頭、索引、所有 Item）打包為單一加密檔案（格式同第 8 章，以同一 KEK 加密），可直接以 `import` 還原到新的 Drive 資料夾。 |
-| FR-BAK-02 | P0 | `export --plain`：匯出為明文 JSON，需二次確認並顯示警告；輸出檔權限 `0600`。 |
+| FR-BAK-01 | P0 | `export --encrypted`：將整個 Vault 打包為單一**可獨立解鎖**的加密檔案（格式見 8.7）。外層明文保存格式版本、KDF 參數、salt 與 VK 的兩份包裝（主密碼、復原金鑰），內層為全部資料；外層資訊納入完整性保護。 |
+| FR-BAK-05 | P0 | 備份驗收條件：在**全新電腦、沒有原本快取、無法登入原 Google 帳號**的情況下，僅憑備份檔加主密碼（或復原金鑰）即可還原為可用的 Vault，可還原到新的 Drive 資料夾或本機資料夾。此條件為自動化測試。 |
+| FR-BAK-06 | P0 | 備份檔內容為所有檔案的 head 修訂與各 Item 保留的版本；`import` 還原時以新的 rev 鏈重新寫入，不保留原修訂歷史。 |
+| FR-BAK-07 | P1 | 匯出時可選擇是否包含操作紀錄與垃圾桶中的項目。 |
+| FR-BAK-02 | P0 | `export --plain`：匯出為明文 JSON，需二次確認並顯示警告；輸出檔以僅本人可讀方式建立（5.3）。 |
 | FR-BAK-03 | P1 | 從其他密碼管理器的匯出檔匯入（Bitwarden JSON / CSV、1Password CSV、KeePass XML、Firefox 與 Edge CSV）。 |
 | FR-BAK-04 | P1 | `verify`：下載所有 Item 並驗證解密與完整性，回報損毀項目。 |
 
@@ -291,7 +317,7 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
 | 編號 | 優先 | 需求 |
 |------|:--:|------|
 | FR-LOG-01 | P0 | 本機記錄每次 Item 建立、修改、刪除、私鑰匯出、金鑰輪替、撤銷、同步衝突，含時間、裝置、操作、目標、結果。 |
-| FR-LOG-02 | P0 | 操作紀錄本身以 KEK 加密存於本機，並作為一個特殊 Item 同步到 Drive，使各裝置可看到彼此的紀錄。 |
+| FR-LOG-02 | P0 | 操作紀錄本身以與其他檔案相同的方式加密存於本機並同步到 Drive，使各裝置可看到彼此的紀錄；分支時取聯集合併。 |
 | FR-LOG-03 | P0 | 紀錄中絕不包含機密值。 |
 | FR-LOG-04 | P1 | `log` 指令可依時間、操作類型、Item 篩選。 |
 
@@ -315,179 +341,212 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
 ### 5.1 加密架構
 
 ```
-  主密碼（使用者記憶）                 復原金鑰（隨機 256-bit，選用）
-         │                                    │
-         ▼ Argon2id（salt 存於 Vault 標頭）     ▼ HKDF
-       KEK（256-bit，僅存在記憶體）  ◄── wrap ── RK-wrapped KEK（存於 Vault 標頭）
-         │
-         │ wrap / unwrap（AES-256-GCM）
-   ┌─────┼──────────────┬──────────────────┐
-   ▼     ▼              ▼                  ▼
- DEK(index)   DEK(item A)    DEK(item B)    DEK(log)     ← 每個檔案一把，隨機 256-bit
-   │           │              │               │
-   ▼ AES-256-GCM              ▼               ▼
- index.enc   items/<id>.enc  items/<id>.enc  log.enc     ← 上傳到 Google Drive 的檔案
+  主密碼（使用者記憶）                      復原金鑰（隨機 256-bit，預設啟用）
+         │                                         │
+         ▼ Argon2id（salt 存於標頭）                 ▼ HKDF-SHA256
+        PK（Password Key）                        RK_key
+         │                                         │
+         │ wrap（AES-256-GCM）                      │ wrap（AES-256-GCM）
+         └────────────────┐       ┌────────────────┘
+                          ▼       ▼
+                 VK（Vault Key，隨機 256-bit，平常不變；有世代號）
+                          │
+                          │ wrap / unwrap（AES-256-GCM）
+          ┌───────────────┼───────────────┬───────────────┐
+          ▼               ▼               ▼               ▼
+      DEK(index)      DEK(item A)      DEK(item B)      DEK(log)     ← 每個檔案修訂一把，隨機 256-bit
+          │               │               │               │
+          ▼ AES-256-GCM   ▼               ▼               ▼
+      index 修訂       item A 修訂      item B 修訂       log 修訂     ← 上傳到 Google Drive 的檔案
 ```
 
-- **KEK 推導**：Argon2id，預設參數記憶體 256 MB、迭代 3、並行 4；參數與 32-byte salt 存於 Vault 標頭，允許日後調高。
-- **每個檔案一把 DEK**：256-bit CSPRNG 產生，以 KEK 用 AES-256-GCM 包裝後存於該檔案標頭。
-- **內容加密**：AES-256-GCM，96-bit 隨機 nonce，每次寫入重新產生。
-- **AAD**：包含檔案格式版本、Vault ID、檔案 ID、檔案類型，防止密文被搬移到其他檔案或其他 Vault。
-- **KEK 驗證**：Vault 標頭存一段以 KEK 加密的固定內容，解鎖時先解此段以判斷主密碼是否正確，不需下載任何 Item。
-- **復原金鑰**：若啟用，KEK 另以復原金鑰經 HKDF 推導的金鑰包裝後存於 Vault 標頭。變更主密碼不影響復原金鑰；重新產生復原金鑰則重新包裝。
+三層結構的理由：
 
-#### 5.1.1 金鑰推導（主密碼 → KEK）
+- **主密碼與復原金鑰是平行的**，各自包裝同一把 VK。變更主密碼只重做 PK 那一份包裝，復原金鑰完全不受影響；反之亦然。
+- **VK 平常不變**，所以改密碼不需要碰任何資料檔，是一次標頭寫入就完成的原子操作。
+- **只有「全面輪替」會換 VK**（產生新世代），那是懷疑金鑰外洩時的獨立操作，代價是全部檔案重新加密，設計上接受中斷並可續行。
+
+共通規則：
+
+- 每個檔案修訂一把隨機 DEK（256-bit CSPRNG），以 VK 用 AES-256-GCM 包裝後存於該檔案標頭。
+- 內容以 AES-256-GCM 加密，96-bit 隨機 nonce，每次寫入重新產生。
+- AAD 為**完整的檔案標頭**（8.2 定義的 150 bytes），包含格式版本、檔案種類、vault_id、file_id、rev、parent_rev、金鑰世代、長度欄位。改動標頭任一 byte 都會使驗證失敗。
+- 標頭的 `vk_check` 區段存一段以 VK 加密的固定內容，解鎖時先解此段判斷主密碼或復原金鑰是否正確，不需下載任何資料。
+
+#### 5.1.1 金鑰推導與解鎖
 
 ```
-輸入：master_password（使用者輸入，UTF-8，先做 NFKC 正規化）
-      header.kdf（algorithm, memory_kib, iterations, parallelism, salt）
+輸入：master_password（UTF-8，先做 NFKC 正規化）、header（見 8.1）
 
-KEK = Argon2id(
-        password   = NFKC(master_password),
-        salt       = header.kdf.salt,          # 32 bytes，建立 Vault 時 CSPRNG 產生
-        memory     = header.kdf.memory_kib,    # 預設 262144（256 MB）
-        iterations = header.kdf.iterations,    # 預設 3
-        parallel   = header.kdf.parallelism,   # 預設 4
-        out_len    = 32)                       # 256-bit
+0. 參數檢查（執行推導之前）：
+     header.wrappings.password.kdf 的 memory_kib ≤ 1048576、iterations ≤ 16、parallelism ≤ 16、
+     salt 長度 == 32；任一不符 → KDF_PARAMS_UNSAFE，不執行
+1. PK = Argon2id(password=NFKC(master_password), salt, memory, iterations, parallel, out_len=32)
+2. VK = AES-256-GCM-Decrypt(key=PK, nonce=wrappings.password.nonce,
+                            aad="hsm-vk-wrap-v1" || vault_id || generation,
+                            ct=wrappings.password.wrapped_vk)
+     失敗 → BAD_PASSWORD；PK zeroize
+3. 驗證：AES-256-GCM-Decrypt(key=VK, nonce=vk_check.nonce, aad=vault_id || generation,
+                            ct=vk_check.ciphertext) == "hsm-vk-check-v1"
+     失敗 → CORRUPTED（標頭損毀或被竄改）
+4. PK zeroize；VK 保存在記憶體直到鎖定
 
-驗證：
-  plaintext = AES-256-GCM-Decrypt(
-                key   = KEK,
-                nonce = header.kek_check.nonce,
-                aad   = header.vault_id,
-                ct    = header.kek_check.ciphertext)
-  plaintext == "hsm-kek-check-v1" → 主密碼正確
-  解密失敗（GCM tag 不符）        → 主密碼錯誤；KEK 立即 zeroize
+以復原金鑰解鎖：
+1. RK = Base32Decode(使用者輸入，忽略空白與大小寫)，長度須為 32 bytes
+2. RK_key = HKDF-SHA256(ikm=RK, salt=wrappings.recovery.hkdf_salt, info="hsm-recovery-v1", len=32)
+3. VK = AES-256-GCM-Decrypt(key=RK_key, nonce=wrappings.recovery.nonce,
+                            aad="hsm-vk-wrap-v1" || vault_id || generation,
+                            ct=wrappings.recovery.wrapped_vk)
+4. 驗證與後續同上；RK、RK_key zeroize
 ```
 
 - NFKC 正規化避免同一密碼在不同作業系統輸入法下得到不同 bytes。
-- 推導只在解鎖時做一次；之後 KEK 保存在記憶體（GUI 程序內或 CLI agent），直到鎖定。
-- 主密碼輸入的緩衝區在推導完成後立即 zeroize。
+- 推導只在解鎖時做一次；之後 VK 保存在記憶體（GUI 程序內或 CLI agent），直到鎖定。
+- 標頭若處於「輪替中」（有兩個世代，見 5.1.6），解鎖時同時解出兩個世代的 VK。
 
-#### 5.1.2 加密一個檔案（寫入 / 上傳）
+#### 5.1.2 加密一個檔案修訂（寫入 / 上傳）
 
-適用於 `index`、`log`、`hosts`、每個 Item 檔案與加密備份檔。以 Item 檔案為例：
+適用於 index、log、hosts、每個 Item 與標頭以外的所有資料檔。以 Item 為例：
 
 ```
-輸入：KEK、vault_id、file_id（Item 的 UUID；非 Item 檔案用固定 UUID）、
-      kind（1=index 2=item 3=log 4=hosts 5=backup）、plaintext_json
+輸入：VK（目前世代 g）、vault_id、file_id、parent_rev（本機所知的 head；首次為全零）、
+      kind、plaintext_json
 
 1. 序列化：plaintext = JSON(plaintext_json)
-2. 壓縮：  compressed = zstd(plaintext)
-3. 產生 DEK：       DEK = CSPRNG(32 bytes)
-4. 包裝 DEK：       dek_nonce   = CSPRNG(12 bytes)
-                   wrapped_dek = AES-256-GCM-Encrypt(key=KEK, nonce=dek_nonce,
-                                   aad=vault_id || file_id, pt=DEK)   # 32 + 16 bytes
-5. 組標頭（偏移 0–108，見 8.2）：
-                   header = "HSM1" || kind || vault_id || file_id ||
-                            dek_nonce || wrapped_dek || nonce || plaintext_len
-                   其中 nonce = CSPRNG(12 bytes)、plaintext_len = len(compressed)
-6. 加密內容：       ciphertext = AES-256-GCM-Encrypt(key=DEK, nonce=nonce,
-                                   aad=header, pt=compressed)         # 含 16 bytes tag
-7. 檔案內容：       file = header || ciphertext
-8. 寫入本機快取（寫暫存檔 → fsync → rename），標記 pending
-9. 上傳到 Drive（檔名依命名規則，appProperties 標示 kind / vault_id / file_id）
-10. zeroize：DEK、plaintext、compressed
+2. 壓縮：  compressed = zstd(plaintext)；len(compressed) > 64 MiB → 拒絕
+3. 新修訂識別：rev = UUIDv4()
+4. 產生 DEK：DEK = CSPRNG(32 bytes)
+5. 包裝 DEK：dek_nonce = CSPRNG(12)
+             wrapped_dek = AES-256-GCM-Encrypt(key=VK_g, nonce=dek_nonce,
+                             aad="hsm-dek-wrap-v1" || vault_id || file_id || rev, pt=DEK)
+6. 組 150-byte 標頭（8.2）：
+             header = "HSM1" || format(1) || kind || vault_id || file_id || rev || parent_rev ||
+                      generation(g) || dek_nonce || wrapped_dek || nonce || plaintext_len
+             其中 nonce = CSPRNG(12)、plaintext_len = len(compressed)
+7. 加密內容：ciphertext = AES-256-GCM-Encrypt(key=DEK, nonce=nonce, aad=header, pt=compressed)
+8. file = header || ciphertext
+9. 寫入本機快取（寫暫存檔 → fsync → rename），記錄 pending
+10. 上傳到 Drive 為**新檔案**（files.create），appProperties 標示 kind / vault_id / file_id / rev /
+    parent_rev / generation；檔名依命名規則
+11. 上傳成功 → 更新 sync_state 的 head 與信任點；清除 pending
+12. zeroize：DEK、plaintext、compressed
 ```
 
-- **每次寫入都換新的 DEK 與 nonce**，不重用；同一 Item 的第 N 版與第 N+1 版是完全不同的密文。
-- AAD 綁定標頭，因此改動標頭任何一個 byte（例如把 `file_id` 換成別的 Item）會讓 GCM 驗證失敗。
-- Drive 只收到第 7 步的 bytes，整個流程不經過任何第三方。
+- 每次寫入都換新的 DEK、nonce 與 rev；同一 Item 的相鄰兩個修訂是完全不同的密文與不同的 Drive 檔案。
+- 寫入前先執行 FR-SYNC-14 的世代檢查。
 
-#### 5.1.3 解密一個檔案（讀取 / 下載）
+#### 5.1.3 解密一個檔案修訂（讀取 / 下載）
 
 ```
-輸入：KEK、file bytes（來自本機快取或 Drive 下載）、預期的 vault_id 與 file_id
+輸入：VK（可能有兩個世代）、file bytes、預期的 vault_id 與 file_id
 
-1. 檢查 magic == "HSM1"，否則 CORRUPTED
-2. 解析標頭；檢查 header.vault_id == 預期 vault_id、header.file_id == 預期 file_id，
-   否則 CORRUPTED（防止被替換成其他 Vault 或其他 Item 的檔案）
-3. 解包 DEK：DEK = AES-256-GCM-Decrypt(key=KEK, nonce=dek_nonce,
-                      aad=vault_id || file_id, ct=wrapped_dek)
-   失敗 → 主密碼不對應此檔案，或檔案被竄改 → CORRUPTED
-4. 解密內容：compressed = AES-256-GCM-Decrypt(key=DEK, nonce=nonce,
-                            aad=header, ct=ciphertext)
-   失敗 → 檔案被竄改或損毀 → CORRUPTED
-5. 檢查 len(compressed) == plaintext_len
-6. 解壓：plaintext = unzstd(compressed)，解壓上限 64 MB 防止壓縮炸彈
-7. 反序列化 JSON，交給上層使用
-8. 使用完畢 zeroize：DEK、compressed、plaintext（含其中的機密欄位）
+1. len(file) < 150 或 > 80 MiB → CORRUPTED
+2. magic == "HSM1" 且 format == 1，否則 CORRUPTED / UNSUPPORTED_FORMAT
+3. 解析 150-byte 標頭；header.vault_id == 預期、header.file_id == 預期，否則 CORRUPTED
+4. plaintext_len ≤ 64 MiB 且 len(file) == 150 + plaintext_len + 16，否則 CORRUPTED
+   （此檢查在任何配置之前；長度欄位本身也在 AAD 內，第 6 步會再驗證）
+5. 依 header.generation 選擇 VK；無該世代 → STALE_GENERATION
+   DEK = AES-256-GCM-Decrypt(key=VK_g, nonce=dek_nonce,
+                              aad="hsm-dek-wrap-v1" || vault_id || file_id || rev, ct=wrapped_dek)
+   失敗 → CORRUPTED
+6. compressed = AES-256-GCM-Decrypt(key=DEK, nonce=nonce, aad=header, ct=ciphertext)
+   失敗 → CORRUPTED
+7. plaintext = unzstd(compressed)，解壓輸出上限 64 MiB
+8. 反序列化 JSON，交給上層
+9. zeroize：DEK、compressed、plaintext
 ```
 
-- 解密完全在本機記憶體進行，明文不寫入磁碟（匯出私鑰等使用者明確要求的動作除外）。
-- 任何一步失敗都不會回傳部分內容。
+- 任何一步失敗都不回傳部分內容。
+- 解密完全在本機記憶體進行，明文不寫入磁碟（使用者明確要求的匯出除外）。
 
 #### 5.1.4 各類檔案的加解密時機
 
-| 檔案 | 解密時機 | 加密（重寫）時機 |
+| 檔案 | 解密時機 | 寫入新修訂的時機 |
 |------|----------|------------------|
-| 標頭 `header` | 解鎖時讀取 KDF 參數與 `kek_check`；本身大部分為明文 | 建立、變更主密碼、更新復原金鑰、修改命名規則 |
-| 索引 `index` | 解鎖後第一次列表時，以及每次同步偵測到 Drive 修訂變更時 | 任何 Item 新增、改名、改標籤、狀態變更後整份重寫 |
-| Item 檔案 | 使用者開啟該 Item 詳細頁或讀取其機密值時，才解密那一個檔案 | 該 Item 任何欄位變更後整份重寫（含所有保留版本） |
-| 主機 `hosts` | 開啟主機頁面或綁定查詢時 | Host 或綁定變更後整份重寫 |
-| 操作紀錄 `log` | 開啟紀錄頁面或同步合併時 | 每次操作後（可批次延後） |
-| 加密備份 | `import` 時 | `export --encrypted` 時，內容為標頭 + 全部檔案的明文打包後再整體加密 |
+| 標頭 | 解鎖時讀取 KDF 參數、VK 包裝與 `vk_check`；本身大部分為明文 | 建立、變更主密碼、更新復原金鑰、修改命名規則、全面輪替的兩個提交點 |
+| 索引 | 解鎖後第一次列表時，以及同步偵測到新 head 時 | 任何 Item 新增、改名、改標籤、狀態變更後整份重寫 |
+| Item | 開啟該 Item 詳細頁或讀取其機密值時，只解密那一個檔案的 head | 該 Item 任何欄位變更後整份重寫（含所有保留版本） |
+| hosts | 開啟主機頁面或綁定查詢時 | Host 或綁定變更後整份重寫 |
+| log | 開啟紀錄頁面或同步合併時 | 每次操作後（可批次延後） |
+| 備份檔 | `import` 時 | `export --encrypted` 時 |
 
-- 列表畫面只需解密索引，不碰任何 Item 檔案；索引的 `summary` 只含非機密欄位。
-- 同步時比對的是 Drive 修訂 ID，不需解密即可判斷是否有變更。
+#### 5.1.5 變更主密碼（含以復原金鑰重設）
 
-#### 5.1.5 變更主密碼
-
-變更主密碼只需重新包裝每個檔案的 DEK，不需要重新加密內容，因此時間與檔案數成正比、與資料大小無關。
+只重做 PK 那一份 VK 包裝，一次標頭寫入完成，不碰任何資料檔。
 
 ```
-1. 以舊主密碼推導 KEK_old 並驗證（5.1.1）
-2. 產生新 salt，以新主密碼推導 KEK_new
-3. 對每個檔案（index、log、hosts、所有 Item）：
-   a. 下載（或取本機快取，需確認與 Drive 修訂一致）
-   b. 以 KEK_old 解包 DEK（5.1.3 第 3 步）
-   c. 以 KEK_new 與新的 dek_nonce 重新包裝 DEK
-   d. 替換標頭中的 dek_nonce 與 wrapped_dek；nonce 與 ciphertext 不變
-   e. 因 AAD 包含標頭，內容需以 DEK 重新計算 GCM tag：
-      實作上直接以同一 DEK、新 nonce 重新加密 compressed（成本極低）
-   f. 上傳到暫存名稱（原檔名加 `.rekey` 後綴，appProperties 標 hsm.rekey=1）
-4. 全部檔案上傳成功後：
-   a. 更新標頭：新 kdf.salt、新 kek_check、以 KEK_new 重新包裝的 recovery.wrapped_kek
-   b. 上傳新標頭
-   c. 逐一將 `.rekey` 檔案改回正式名稱並刪除舊檔
-5. 任一步失敗：刪除所有 `.rekey` 檔案，標頭未更新，舊主密碼仍有效
-6. zeroize KEK_old、KEK_new 保留為目前 KEK
+1. 取得 VK：以舊主密碼（5.1.1）或復原金鑰解開
+2. 新 salt = CSPRNG(32)；以新主密碼推導 PK_new（參數同標頭，或使用者選擇調高）
+3. 新包裝 = AES-256-GCM-Encrypt(key=PK_new, nonce=CSPRNG(12),
+                aad="hsm-vk-wrap-v1" || vault_id || generation, pt=VK)
+4. 組新標頭：只替換 wrappings.password（kdf、salt、nonce、wrapped_vk）；
+   wrappings.recovery、vk_check、generation、naming 全部不變
+5. 寫入新標頭修訂（parent_rev = 目前標頭 head），上傳
+6. 成功 → 本機記錄新 head；失敗 → 什麼都沒變，舊主密碼仍有效
+7. zeroize PK_new；VK 不變、繼續使用
 ```
 
-- 第 4 步之前，Drive 上同時存在舊密文與 `.rekey` 新密文，其他裝置仍以舊主密碼運作。
-- 第 4b 之後其他裝置解鎖時會發現 `kek_check` 無法通過，提示「主密碼已在其他裝置變更，請輸入新主密碼」。
-- Drive 的修訂歷史會保留舊密文一段時間，這些舊密文仍只能用舊主密碼解開；舊主密碼外洩時應視為需要輪替內容而非只換主密碼。
+- 其他裝置下次解鎖時讀到新標頭 head，舊主密碼解包失敗，提示「主密碼已在其他裝置變更」。
+- 若兩台裝置同時改密碼，標頭出現兩個 head（FR-SYNC-06）；工具拒絕一切寫入並要求使用者選擇保留哪一份（兩份都能解開 VK，不會遺失資料）。
+- **此操作不會讓舊主密碼失去解開舊標頭修訂的能力**。若懷疑舊主密碼已外洩，必須執行 5.1.6 的全面輪替，並以 `gc --purge-header-history` 清除舊標頭修訂。
 
-#### 5.1.6 復原金鑰
+#### 5.1.6 全面輪替金鑰（新世代）
+
+懷疑 VK、主密碼或復原金鑰外洩時使用。產生新世代 VK，每個檔案以**新的 DEK 重新加密內容**（不只是重新包裝，因為舊 DEK 可能已隨舊 VK 外洩）。採兩個明確提交點，任何時刻中斷都可續行或判定回復。
+
+```
+前置：Vault 處於單一世代 g，沒有未解決衝突、沒有 pending 上傳
+提交點 A（開始）：
+  A1. VK_{g+1} = CSPRNG(32)
+  A2. 新標頭：generations = [
+        { gen: g,   status: "retiring", wrappings: {password, recovery} },   # 原有包裝不動
+        { gen: g+1, status: "active",   wrappings: {password, recovery}, vk_check }  # 以目前 PK 與 RK_key 包裝 VK_{g+1}
+      ]
+      （復原金鑰若已遺失，此時可同時產生新的復原金鑰）
+  A3. 寫入標頭修訂並上傳；成功後 g+1 即為「寫入世代」
+遷移：
+  M1. 列出每個 file_id 的 head；對 generation == g 者：
+        解密（5.1.3，用 VK_g）→ 以 VK_{g+1} 重新加密為新修訂（5.1.2，parent_rev = 該 head）→ 上傳
+  M2. 可中斷；重啟後重新列出，只處理仍為世代 g 的 head（已完成者略過）
+  M3. 遷移期間其他裝置：解鎖時讀到兩個世代，可讀取任何檔案；任何寫入必須用 g+1（FR-SYNC-14）
+提交點 B（完成）：
+  B1. 再次列出所有 file_id 的 head，確認全部 generation == g+1，且無分支
+  B2. 新標頭：移除世代 g；寫入標頭修訂並上傳
+  B3. 本機與其他裝置下次同步後 zeroize VK_g
+  B4. 建議執行 gc --purge-header-history 與 gc --purge-generation g，刪除舊世代修訂
+```
+
+- 任何時候都**不刪除**暫存或舊修訂來「回復」；舊世代檔案直到提交點 B 之後才由 `gc` 清理。
+- 若在 A3 之後決定放棄：工具提供「取消輪替」操作，將標頭改回單一世代 g，並把已遷移到 g+1 的 head 再以 VK_g 寫回新修訂。此操作同樣可續行。
+- 若標頭在遷移期間出現分支（例如另一台裝置同時改密碼），遷移暫停並要求先解決標頭衝突。
+- 復原金鑰同時更換時，使用者須在提交點 A 前完成新復原金鑰的保存確認。
+
+#### 5.1.7 復原金鑰
 
 ```
 建立（init 或 regenerate）：
-  RK        = CSPRNG(32 bytes)，以 Base32 顯示給使用者（52 字元，每 4 字一組）
-  hkdf_salt = CSPRNG(32 bytes)
+  RK        = CSPRNG(32 bytes)，以 Base32 顯示（52 字元，每 4 字一組）
+  hkdf_salt = CSPRNG(32)
   RK_key    = HKDF-SHA256(ikm=RK, salt=hkdf_salt, info="hsm-recovery-v1", len=32)
-  recovery.wrapped_kek = AES-256-GCM-Encrypt(key=RK_key, nonce=CSPRNG(12),
-                           aad=vault_id, pt=KEK)
-  存入標頭 recovery 區段；RK 本身不存任何地方，顯示後 zeroize
+  wrappings.recovery = { hkdf_salt, nonce=CSPRNG(12),
+                         wrapped_vk = AES-256-GCM-Encrypt(key=RK_key, nonce,
+                                        aad="hsm-vk-wrap-v1" || vault_id || generation, pt=VK) }
+  寫入標頭修訂；RK 本身不存任何地方，顯示後 zeroize
 
-使用（遺忘主密碼）：
-  1. 使用者輸入 RK（Base32，忽略空白與大小寫）
-  2. 推導 RK_key，解包得到 KEK；失敗 → 復原金鑰錯誤
-  3. 要求設定新主密碼，執行 5.1.5 的流程，但第 1 步改為「KEK_old = 此 KEK」
-  4. 建議使用者同時重新產生復原金鑰
+重新產生復原金鑰：只替換 wrappings.recovery，一次標頭寫入；主密碼不受影響。
+使用：見 5.1.1 的復原金鑰解鎖，之後執行 5.1.5 設定新主密碼，並建議重新產生復原金鑰。
 ```
 
-- 復原金鑰解開的是 KEK，不是個別 DEK，因此復原後所有檔案立即可讀，不需逐檔處理。
-- 變更主密碼不影響復原金鑰（5.1.5 第 4a 步只是以新 KEK 重新包裝，KEK 本身未變）。
+#### 5.1.8 演算法與參數總表
 
-#### 5.1.7 演算法與參數總表
-
-| 用途 | 演算法 | 參數 |
+| 用途 | 演算法 | 參數與上限 |
 |------|--------|------|
-| 主密碼 → KEK | Argon2id | 256 MB、3 次、4 並行、32-byte salt、輸出 32 bytes；參數存於標頭可調 |
+| 主密碼 → PK | Argon2id | 預設 256 MiB、3 次、4 並行；硬性上限 1 GiB、16 次、16 並行；32-byte salt；輸出 32 bytes |
 | 復原金鑰 → RK_key | HKDF-SHA256 | 32-byte salt、info `hsm-recovery-v1` |
-| 包裝 DEK、KEK 驗證、包裝 KEK | AES-256-GCM | 12-byte 隨機 nonce、16-byte tag |
-| 檔案內容加密 | AES-256-GCM | 每檔案獨立 DEK、12-byte 隨機 nonce、AAD = 檔案標頭 |
-| 壓縮 | zstd | 加密前壓縮，解壓上限 64 MB |
+| 包裝 VK（PK、RK_key）、`vk_check` | AES-256-GCM | 12-byte 隨機 nonce、16-byte tag、AAD 含 vault_id 與世代 |
+| 包裝 DEK（VK） | AES-256-GCM | AAD 含 vault_id、file_id、rev |
+| 檔案內容加密 | AES-256-GCM | 每修訂獨立 DEK、12-byte 隨機 nonce、AAD = 完整 150-byte 標頭 |
+| 壓縮 | zstd | 加密前壓縮；壓縮後與解壓後皆上限 64 MiB |
 | 隨機來源 | 作業系統 CSPRNG | `crypto/rand` 或等效 |
 | 記憶體清除 | zeroize | 所有金鑰、明文緩衝區使用後覆寫 |
 
@@ -498,10 +557,10 @@ KEK = Argon2id(
 | Google 可見 | Google 不可見 |
 |-------------|---------------|
 | 資料夾名稱與檔案名稱（皆使用者自訂或預設） | 任何 Item 名稱、帳號、密碼、私鑰、備註、標籤 |
-| 檔案的 `appProperties`（`hsm.kind`、`hsm.vault_id` 等，標示檔案用途） | |
+| 檔案的 `appProperties`（`hsm.kind`、`hsm.vault_id`、`hsm.rev` 等，標示檔案用途與修訂鏈） | |
 | 檔案數量與各檔案大小 | Item 型別（檔名為隨機識別碼，內容加密） |
-| 檔案建立與修改時間 | 主機名稱與位址 |
-| Vault 標頭中的 KDF 參數與 salt（非機密） | 主密碼、KEK、DEK、復原金鑰 |
+| 檔案建立時間、修訂數量與頻率 | 主機名稱與位址 |
+| Vault 標頭中的 KDF 參數、salt、VK 的包裝密文（非機密） | 主密碼、PK、VK、DEK、復原金鑰 |
 
 檔案大小會透露粗略資訊（例如 RSA-4096 私鑰比 ed25519 大）。第一版接受此洩漏，第二階段可評估固定區塊填充（padding）。
 
@@ -509,12 +568,21 @@ KEK = Argon2id(
 
 ### 5.3 本機安全
 
-1. KEK 與明文機密僅在處理期間存在記憶體，使用後立即覆寫（zeroize）。
-2. agent 程序（FR-INIT-06）以 `mlock` 或等效機制防止 KEK 被換頁到磁碟；逾時或系統休眠時清除。
+1. VK、DEK 與明文機密僅在處理期間存在記憶體，使用後立即覆寫（zeroize）。
+2. agent 程序（FR-INIT-06）以 `mlock` 或等效機制防止 VK 被換頁到磁碟；逾時或系統休眠時清除。
 3. 本機快取只存密文，與 Drive 上內容相同；本機快取遭竊等同 Drive 檔案遭竊，仍受主密碼保護。
-4. 本機設定目錄權限 `0700`，其中所有檔案 `0600`。
-5. 任何日誌、錯誤訊息、崩潰報告不得包含機密值、主密碼、KEK、OAuth token。
-6. 寫入私鑰到磁碟時，拒絕寫入到 world-readable 目錄並警告。
+4. 任何日誌、錯誤訊息、崩潰報告不得包含機密值、主密碼、VK、OAuth token。
+5. 寫入私鑰到磁碟時，先檢查目標目錄的權限（Unix：非本人以外可寫或可讀；Windows：ACL 含本人、SYSTEM、Administrators 以外的允許項目）不安全則拒絕並警告。
+
+**檔案權限的平台差異**
+
+| 平台 | 設定目錄 / 快取目錄 | 匯出的私鑰、明文匯出、暫存檔 | 驗證方式 |
+|------|------|------|------|
+| Linux / macOS | 建立時 `mkdir 0700`；檔案以 `O_CREAT \| O_EXCL`、mode `0600` 建立 | 同左；暫存檔在目標目錄內以 `O_EXCL` 建立後 rename | 寫入前 `stat` 確認 mode 與擁有者 |
+| Windows | 建立時透過 `SECURITY_ATTRIBUTES` 指定 DACL：僅目前使用者 SID 完全控制，停用繼承；不依賴 `os.Chmod`（在 Windows 只影響唯讀屬性） | 同左，以 `CreateFile` 帶 DACL 建立 | 寫入前讀取 DACL，確認不含其他使用者或 `Everyone` / `Users` 的允許 ACE |
+
+6. **絕不先寫入明文再收緊權限**：所有含明文機密的檔案都在建立那一刻就帶上最終權限。
+7. agent 的通訊端點：Unix 為 `0700` 目錄內的 Unix domain socket，連線時以 `SO_PEERCRED` / `LOCAL_PEERCRED` 驗證對方 UID 等於自己；Windows 為具僅本人 DACL 的 named pipe，連線時以 `GetNamedPipeClientProcessId` 取得程序並比對其 token 的使用者 SID。詳見 5.6。
 
 ### 5.4 Google 授權安全
 
@@ -528,12 +596,37 @@ KEK = Argon2id(
 | 威脅 | 防護措施 | 殘餘風險 |
 |------|----------|----------|
 | Google 帳號遭入侵，攻擊者取得 Drive 檔案 | 全部內容客戶端加密，Argon2id 抵抗離線暴力破解 | 弱主密碼可被破解；檔案大小洩漏粗略資訊 |
-| 攻擊者刪除或竄改 Drive 檔案 | AES-GCM 驗證竄改；Drive 修訂歷史與本機快取可還原；`verify` 指令偵測 | 攻擊者可造成資料遺失（可用性），需靠備份補救 |
-| 本機電腦遭竊 | 快取為密文；OAuth token 在金鑰圈；agent 逾時清除 KEK | 電腦處於 unlocked 且未鎖定螢幕時無保護 |
-| 本機惡意軟體 | 超出本工具防護範圍 | 可讀取記憶體中的 KEK 與明文；列為已知限制 |
+| 攻擊者刪除或竄改 Drive 檔案 | AES-GCM 驗證竄改；工具自己保留的不可覆寫修訂與本機快取可還原；`verify` 指令偵測 | 攻擊者可造成資料遺失（可用性），需靠獨立備份補救 |
+| 攻擊者把 Drive 上的資料換回舊的合法密文（回滾） | 每台裝置記錄信任的 head 與雜湊，鏈不連續時拒絕寫入並警告 | 全新裝置首次同步無法辨識回滾，需人工比對（FR-SYNC-11） |
+| 本機電腦遭竊 | 快取為密文；OAuth token 在金鑰圈；agent 逾時清除 VK | 電腦處於 unlocked 且未鎖定螢幕時無保護 |
+| 本機惡意軟體 | 超出本工具防護範圍 | 可讀取記憶體中的 VK 與明文；列為已知限制 |
+| 同一台電腦上的其他使用者帳號 | 所有檔案建立時即為僅本人可讀（含 Windows ACL）；agent 端點驗證呼叫者身分 | 管理員權限的帳號仍可讀取 |
+| 惡意或損毀的檔案（長度欄位、KDF 參數被竄改） | 配置記憶體前檢查長度與檔案大小；執行 KDF 前檢查參數上限；完整標頭納入 AAD | 無 |
+| 主密碼外洩但攻擊者只有舊密文 | 全面輪替產生新世代並重新加密；`gc` 清除舊世代與舊標頭修訂 | Google 伺服器端可能仍保留已刪除檔案一段時間 |
 | 主密碼遺忘 | 復原金鑰 | 兩者皆遺失則資料永久不可讀 |
-| 多裝置同時修改 | 每 Item 獨立檔案、修訂比對、保留雙方版本 | 需使用者手動解決衝突 |
+| 多裝置同時修改 | 每次寫入為獨立不可覆寫修訂，事後以修訂鏈偵測分支，雙方都保留 | 需使用者手動解決衝突 |
 | 工具本身的 OAuth client 憑證外洩 | 桌面應用程式的 client secret 本就不視為機密；PKCE 防止授權碼攔截 | 他人可冒用 client 名稱釣魚，需在文件提醒使用者 |
+
+
+### 5.6 GUI 與 agent 強化
+
+**桌面 GUI（WebView）**
+
+1. WebView 只載入隨程式打包的前端資源（自訂 scheme 或 localhost 內嵌伺服器綁定隨機埠與一次性 token），不載入任何遠端 URL。
+2. Content-Security-Policy：`default-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; frame-ancestors 'none'`。禁止 `eval` 與 inline script。
+3. 使用者輸入的任何欄位（名稱、備註、網址、匯入的 CSV 內容、Chrome 資料）一律以文字節點渲染，絕不當作 HTML 插入。
+4. 外部連結只允許 `http://` 與 `https://`，以作業系統預設瀏覽器開啟，開啟前顯示完整網址請使用者確認；其他協定一律拒絕。
+5. 正式版停用開發者工具與右鍵檢視原始碼；前端與 Go 後端之間的呼叫介面只暴露明確列舉的方法。
+6. 剪貼簿寫入只由使用者動作觸發；視窗內的機密值在遮罩狀態下不存在於 DOM。
+
+**本機 agent（CLI 解鎖狀態維持）**
+
+1. 端點與呼叫者驗證見 5.3 第 7 點；驗證失敗的連線立即關閉並記錄。
+2. agent **從不輸出 VK**。提供的操作只有：`status`、`lock`、`unwrap_dek(file_header)`（回傳該檔案的 DEK）、`wrap_dek(file_header, dek)`、`unwrap_header()`（回傳標頭中世代資訊）。內容的加解密由呼叫端自行完成。
+3. 每個操作需帶 Vault ID；agent 每個 Vault 最多保存一組（可能兩個世代）VK。
+4. 逾時、系統休眠、使用者鎖定螢幕（可偵測時）、收到 `lock` 時清除所有 VK。
+5. 對 `unwrap_dek` 做速率限制（預設每秒 50 次），超過即暫停並記錄，避免被用來大量解包。
+6. agent 以目前使用者身分執行，不需也不可提權。
 
 ---
 
@@ -549,7 +642,7 @@ KEK = Argon2id(
 │  │ 桌面 GUI  │───▶│ Core 程式庫   │                     │
 │  └──────────┘    │ ├ Vault 管理  │    ┌──────────────┐ │
 │  ┌──────────┐    │ ├ 加密層      │◀──▶│ agent（選用） │ │
-│  │ CLI      │───▶│ ├ 金鑰引擎    │    │ 保存 KEK     │ │
+│  │ CLI      │───▶│ ├ 金鑰引擎    │    │ 保存 VK     │ │
 │  └──────────┘    │ ├ 同步引擎    │    └──────────────┘ │
 │                  │ ├ 匯入引擎    │                     │
 │                  │ └ 儲存層介面  │                     │
@@ -580,12 +673,12 @@ KEK = Argon2id(
 ### 6.2 操作流程（以「匯出私鑰」為例，GUI 與 CLI 相同）
 
 1. 介面層讀取設定，取得 Vault 的 Drive 資料夾 ID 與本機快取路徑。
-2. 取得 KEK：GUI 於解鎖後保存在程序記憶體；CLI 向 agent 詢問，agent 不存在或已逾時則提示主密碼，以 Vault 標頭的 KDF 參數推導，並以標頭中的驗證段確認。
-3. 同步索引：下載 `index.enc`（若 Drive 修訂未變則略過），解密，更新本機索引快取。離線模式略過此步。
-4. 依名稱在索引中找到 Item ID，確認本機快取的該 Item 檔案修訂與索引一致，否則下載。
-5. 解密 Item 檔案，取出目前版本的私鑰，依要求格式轉換。
-6. 檢查狀態非 `revoked`（或已 `--force`）。
-7. 寫入目標檔案（`0600`）。
+2. 取得 VK：GUI 於解鎖後保存在程序記憶體；CLI 透過 agent 解包 DEK，agent 不存在或已逾時則提示主密碼，以標頭的 KDF 參數推導 PK 解開 VK，並以 `vk_check` 確認。
+3. 同步索引：列出索引的修訂，若 head 未變則略過；否則下載新 head，解密，更新本機索引快取。離線模式略過此步。
+4. 依名稱在索引中找到 Item ID，列出該 Item 的修訂確認 head，確認鏈包含本機信任點（FR-SYNC-10），本機快取沒有 head 則下載。
+5. 解密 Item 檔案，取出 `active` 版本（或 `--version` 指定）的私鑰，依要求格式轉換。
+6. 檢查該版本狀態非 `revoked`（或已 `--force`）；`retired` 時顯示警告。
+7. 以僅本人可讀的方式建立目標檔案並寫入（5.3）。
 8. 寫入本機操作紀錄並排程上傳 `log.enc`。
 9. zeroize 記憶體中的私鑰與 DEK。
 
@@ -595,7 +688,7 @@ KEK = Argon2id(
 |------|------|------|
 | `~/.config/hsm/config.yaml` | Vault 清單、各 Vault 的 Drive 資料夾 ID、預設 Vault、agent 逾時等設定 | 0600 |
 | `~/.config/hsm/device_id` | 本裝置識別碼（UUID） | 0600 |
-| `~/.cache/hsm/<vault_id>/` | 各 Drive 檔案的快取，以及 `sync_state.json`（各檔案已知修訂、pending 標記、Drive 檔案 ID 對應）。本機快取一律使用固定內部名稱（`header`、`index`、`log`、`hosts`、`items/<id>`），與 Drive 上使用者自訂的檔名無關 | 0700 / 0600 |
+| `~/.cache/hsm/<vault_id>/` | 各邏輯檔案 head 修訂的快取，以及 `sync_state.json`（每個 `file_id` 的 head rev、信任點 rev 與 SHA-256、金鑰世代、pending 標記、rev 與 Drive 檔案 ID 對應）。本機快取一律使用固定內部名稱（`header`、`index`、`log`、`hosts`、`items/<id>`），與 Drive 上使用者自訂的檔名無關 | Unix 0700 / 0600；Windows 僅本人 ACL |
 | OS 金鑰圈 | OAuth refresh token，鍵名 `hsm/<vault_id>/google` | 由系統管理 |
 
 Windows 對應路徑為 `%APPDATA%\hsm\` 與 `%LOCALAPPDATA%\hsm\cache\`。
@@ -637,24 +730,45 @@ Windows 對應路徑為 `%APPDATA%\hsm\` 與 `%LOCALAPPDATA%\hsm\cache\`。
 
 | 命名規則鍵 | 預設檔名 | `hsm.kind` | 內容 | 是否加密 | 更新時機 |
 |------------|----------|------------|------|:--:|------|
-| `header` | `vault.hsm` | `header` | Vault 標頭：格式版本、vault_id、KDF 參數與 salt、KEK 驗證段、RK-wrapped KEK、命名規則、建立時間 | 部分（見 8.1） | 建立、變更主密碼、更新復原金鑰、修改命名規則 |
+| `header` | `vault.hsm` | `header` | Vault 標頭：格式版本、vault_id、各世代的 VK 包裝（主密碼、復原金鑰）、`vk_check`、命名規則、建立時間 | 部分（見 8.1） | 建立、變更主密碼、更新復原金鑰、修改命名規則、全面輪替提交點 |
 | `index` | `index.enc` | `index` | 所有 Item 的摘要：id、名稱、型別、標籤、狀態、updated_at、目前版本號、到期日、綁定主機 | 是 | 任何 Item 新增、改名、改標籤、狀態變更 |
 | `log` | `log.enc` | `log` | 操作紀錄（滾動保留最近 5,000 筆） | 是 | 每次操作後（可批次延後上傳） |
 | `hosts` | `hosts.enc` | `hosts` | 所有 Host 紀錄與綁定關係 | 是 | Host 變更時 |
 | `items_folder` | `items` | `items_folder` | 存放 Item 檔案的子資料夾 | 不適用 | 建立時 |
 | `item_pattern` | `{id}.enc` | `item` | 單一 Item 的全部版本；`{id}` 替換為該 Item 的 UUID v4 | 是 | 該 Item 變更時 |
 
-- `{id}` 為 UUID v4，與 Item 內容無關。`item_pattern` 可為任意含 `{id}` 的樣式，例如 `IMG_{id}.jpg`、`{id}`（無副檔名）。
+- `{id}` 為 UUID v4，與 Item 內容無關。`item_pattern` 可為任意含 `{id}` 的樣式，例如 `IMG_{id}.jpg`、`{id}`（無副檔名）。所有命名規則鍵都可額外使用 `{rev}` 佔位符（修訂 UUID 前 8 碼）；不使用時，同一邏輯檔案的多個修訂在 Drive 上會是多個同名檔案（Drive 允許同名），工具以 `appProperties` 區分。
+- 每個邏輯檔案在 Drive 上是「一個或多個修訂檔案」。head 的判定見 7.4，不是「最新修改時間」。
 - `items_folder` 設為空字串時，Item 檔案直接放在 Vault 資料夾內，不建子資料夾。
-- 工具讀寫檔案時一律先以 `appProperties`（`hsm.kind`、`hsm.vault_id`，Item 另有 `hsm.file_id`）查詢取得 Drive 檔案 ID，並快取在 `sync_state.json`；檔名只在建立與重新命名時使用。
+- 工具讀寫檔案時一律先以 `appProperties`（`hsm.kind`、`hsm.vault_id`、`hsm.file_id`、`hsm.rev`、`hsm.parent_rev`、`hsm.gen`，合併修訂另有 `hsm.merge_parents`）查詢，並快取在 `sync_state.json`；檔名只在建立與重新命名時使用。
 - 所有檔案以 `multipart` 或 `resumable` 上傳；單檔小於 5 MB 用 multipart。
 - 修改命名規則（FR-DRIVE-16）流程：更新標頭 `naming` 並上傳 → 逐一 `files.update(name=...)` → 全部成功後更新本機快取的對應；任一步失敗時狀態畫面顯示「命名規則更新未完成」，可重試。
 
-### 7.4 修訂與衝突
+### 7.4 修訂鏈、head 判定與衝突
 
-- 每次 `files.get` 記錄 `headRevisionId`，存於 `sync_state.json`。
-- 上傳前先 `files.get(fields=headRevisionId)` 比對；不一致即觸發 FR-SYNC-06 流程。此比對與上傳之間仍有競態視窗，接受此風險（個人使用情境下機率極低），且即使發生，Drive 修訂歷史仍保留被覆蓋的版本。
-- 工具不呼叫 `revisions.delete`；使用者若要清理可在 Drive 網頁操作。
+**寫入**：永遠 `files.create` 新檔案，帶 `hsm.rev`（新 UUID）與 `hsm.parent_rev`（本機所知 head）。從不 `files.update` 資料檔內容，也從不依賴 Drive 的 revision 歷史。
+
+**同步一個邏輯檔案（file_id）**：
+
+```
+1. list：query appProperties has hsm.file_id = X（分頁取完），得到修訂集合 R，每筆含 rev、parent_rev、merge_parents、gen、size、Drive file id
+2. 建圖：每個 rev 指向 parent_rev 與 merge_parents；找出所有「沒有任何修訂以它為 parent」的 rev，即 heads
+3. heads == 1：
+     若 sync_state 有信任點 T：T 必須是 head 的祖先（沿 parent 走得到），否則 ROLLBACK_SUSPECTED
+     head 與本機快取不同 → 下載、解密驗證、更新快取與信任點
+4. heads > 1：分支
+     index：以所有 Item 的 head 重建索引，寫入合併修訂（merge_parents = 全部 heads）
+     log：解密各 head，取紀錄聯集，寫入合併修訂
+     item / hosts：解密各 head，內容完全相同 → 寫入合併修訂；否則標記 conflict，列入待處理，禁止寫入該檔案
+     header：禁止一切寫入，要求使用者在設定畫面選擇保留哪一份（兩份皆可解鎖）
+5. heads == 0 且 R 非空（鏈上有環或 parent 指向不存在的 rev）：CORRUPTED_CHAIN，要求使用者從備份或本機快取復原
+6. R 為空但本機有快取：該檔案在 Drive 被刪除，標記 missing（7.5）
+```
+
+- 分支只會在「兩台裝置以相同 parent_rev 各自寫入」時出現，和兩者寫入的先後或時鐘無關。
+- 解決衝突的修訂把所有 heads 列入 `merge_parents`，之後它們都不再是 head。
+- 離線寫入累積多個本機修訂時，上線後依序上傳（每個的 parent_rev 是前一個），只會形成一條鏈。
+- `gc` 刪除修訂的條件見 FR-SYNC-12；刪除時先確認該 rev 不是任何 head、不是任何裝置可能持有的信任點（保留期內一律不刪）。
 
 ### 7.5 API 配額與錯誤處理
 
@@ -663,7 +777,7 @@ Windows 對應路徑為 `%APPDATA%\hsm\` 與 `%LOCALAPPDATA%\hsm\cache\`。
 | HTTP 403 `rateLimitExceeded` / 429 | 指數退避：1s、2s、4s、8s、16s，最多 5 次 |
 | HTTP 5xx | 同上 |
 | HTTP 401 | 以 refresh token 更新 access token 後重試一次；仍失敗則要求重新授權 |
-| HTTP 404（檔案被使用者刪除） | 索引中標記該 Item 為 `missing`，`status` 顯示並建議從本機快取或 Drive 垃圾桶還原 |
+| HTTP 404 或 list 為空（檔案被使用者刪除） | 索引中標記該 Item 為 `missing`，`status` 顯示並提供「從本機快取重新上傳」或「從備份還原」 |
 | 網路不可用 | 立即改為離線模式，寫入操作保留 pending |
 | Drive 空間不足 | 回報錯誤，保留 pending |
 
@@ -673,30 +787,35 @@ Windows 對應路徑為 `%APPDATA%\hsm\` 與 `%LOCALAPPDATA%\hsm\cache\`。
 
 ### 8.1 Vault 標頭 `vault.hsm`
 
-JSON，明文可讀（不含機密）：
+JSON，明文可讀（不含機密）。標頭也是一個邏輯檔案，有自己的 rev 鏈（`rev`、`parent_rev` 存於 appProperties 與 JSON 內，兩者必須一致）。
 
 ```json
 {
   "format": 1,
   "vault_id": "0190a4c2-....",
+  "rev": "....",
+  "parent_rev": "....",
   "created_at": "2026-10-28T08:00:00Z",
-  "kdf": {
-    "algorithm": "argon2id",
-    "memory_kib": 262144,
-    "iterations": 3,
-    "parallelism": 4,
-    "salt": "<base64 32 bytes>"
-  },
-  "kek_check": {
-    "nonce": "<base64 12 bytes>",
-    "ciphertext": "<base64>"
-  },
-  "recovery": {
-    "enabled": true,
-    "hkdf_salt": "<base64 32 bytes>",
-    "nonce": "<base64 12 bytes>",
-    "wrapped_kek": "<base64>"
-  },
+  "generations": [
+    {
+      "gen": 1,
+      "status": "active",
+      "wrappings": {
+        "password": {
+          "kdf": { "algorithm": "argon2id", "memory_kib": 262144, "iterations": 3, "parallelism": 4, "salt": "<base64 32 bytes>" },
+          "nonce": "<base64 12 bytes>",
+          "wrapped_vk": "<base64 48 bytes>"
+        },
+        "recovery": {
+          "enabled": true,
+          "hkdf_salt": "<base64 32 bytes>",
+          "nonce": "<base64 12 bytes>",
+          "wrapped_vk": "<base64 48 bytes>"
+        }
+      },
+      "vk_check": { "nonce": "<base64 12 bytes>", "ciphertext": "<base64>" }
+    }
+  ],
   "naming": {
     "header": "vault.hsm",
     "index": "index.enc",
@@ -711,58 +830,74 @@ JSON，明文可讀（不含機密）：
 }
 ```
 
-- `kek_check.ciphertext` 為字串 `"hsm-kek-check-v1"` 以 KEK 加密的結果，AAD 為 `vault_id`。
-- `naming` 為此 Vault 的命名規則，值皆為使用者自訂，上例為預設值。標頭檔自己的名稱也記在其中，供重新命名時使用。
+- `generations` 平常只有一個元素（`active`）。全面輪替期間有兩個：舊的 `retiring`、新的 `active`。超過兩個或兩個皆 `active` 視為 CORRUPTED。
+- `wrappings.password` 與 `wrappings.recovery` 包裝的是同一把 VK，AAD 為 `"hsm-vk-wrap-v1" || vault_id || gen`。
+- `vk_check.ciphertext` 為字串 `"hsm-vk-check-v1"` 以 VK 加密的結果，AAD 為 `vault_id || gen`。
+- 讀取標頭時先檢查 `format`、各 `kdf` 參數上限（FR-INIT-11）、base64 欄位長度，再做任何推導。
+- `naming` 為此 Vault 的命名規則，值皆為使用者自訂，上例為預設值。
 - `devices` 清單僅供顯示，不用於授權。
 
-### 8.2 加密檔案格式（`index.enc`、`items/*.enc`、`log.enc`、`hosts.enc`、備份檔）
+### 8.2 加密檔案格式（index、items、log、hosts 的每個修訂）
 
-二進位格式，所有整數為 big-endian：
+這是**唯一**的位元組格式，5.1.2 與 5.1.3 的描述以此為準。所有整數為 big-endian，標頭固定 150 bytes：
 
 | 偏移 | 長度 | 欄位 | 說明 |
 |------|------|------|------|
 | 0 | 4 | magic | ASCII `HSM1` |
-| 4 | 1 | kind | 1 = index、2 = item、3 = log、4 = hosts、5 = backup |
-| 5 | 16 | vault_id | UUID bytes |
-| 21 | 16 | file_id | item_id；非 Item 檔案為固定 UUID |
-| 37 | 12 | dek_nonce | 包裝 DEK 用 |
-| 49 | 48 | wrapped_dek | 32 bytes DEK + 16 bytes GCM tag |
-| 97 | 12 | nonce | 內容加密用 |
-| 109 | 4 | plaintext_len | 解密後長度，供預先配置 |
-| 113 | n | ciphertext | 內容 + 16 bytes GCM tag |
+| 4 | 1 | format | 格式版本，目前為 1 |
+| 5 | 1 | kind | 1 = index、2 = item、3 = log、4 = hosts |
+| 6 | 16 | vault_id | UUID bytes |
+| 22 | 16 | file_id | Item 的 UUID；非 Item 檔案為固定 UUID（index、log、hosts 各一） |
+| 38 | 16 | rev | 此修訂的 UUID |
+| 54 | 16 | parent_rev | 上一個修訂的 UUID；首個修訂為全零。合併修訂的其他 parent 存於 appProperties `hsm.merge_parents` 與明文 JSON 內的 `merge_parents`，並在解密後比對 |
+| 70 | 4 | generation | 包裝 DEK 所用 VK 的世代 |
+| 74 | 12 | dek_nonce | 包裝 DEK 用 |
+| 86 | 48 | wrapped_dek | 32 bytes DEK + 16 bytes GCM tag |
+| 134 | 12 | nonce | 內容加密用 |
+| 146 | 4 | plaintext_len | 壓縮後明文長度（= ciphertext 長度 − 16） |
+| 150 | plaintext_len + 16 | ciphertext | zstd 壓縮內容的 AES-256-GCM 密文 + 16 bytes tag |
 
-- AAD = 偏移 0 到 108 的全部標頭 bytes。
-- 內容為 JSON，經 zstd 壓縮後再加密（壓縮於加密前，個人使用情境不考慮壓縮側通道）。
+- **AAD = 偏移 0 到 149 的完整標頭（150 bytes）**，包含 `plaintext_len`。
+- 解析順序與硬性上限（5.1.3）：先檢查檔案總長度在 `[166, 80 MiB]`，再檢查 `plaintext_len ≤ 64 MiB` 且總長度 == 150 + plaintext_len + 16；全部通過才配置緩衝區與解密。長度欄位在驗證前只用來做這些比對，不用來配置與明文長度相關的記憶體。
+- 內容為 JSON，經 zstd 壓縮後再加密（壓縮於加密前，個人使用情境不考慮壓縮側通道）。解壓縮輸出上限 64 MiB。
 
 ### 8.3 Item 內容（解密後 JSON）
 
 ```json
 {
   "id": "0190a4c2-....",
+  "rev": "....",
+  "parent_rev": "....",
+  "merge_parents": [],
   "type": "key_pair",
   "name": "prod-web-01-deploy",
   "tags": ["prod", "web"],
-  "status": "active",
-  "revoked_reason": null,
   "expires_at": null,
   "rotation_days": 90,
   "created_at": "...",
   "updated_at": "...",
   "updated_by_device": "...",
-  "conflict": false,
+  "deleted_at": null,
   "current_version": 2,
   "versions": [
     {
       "version": 2,
+      "status": "active",
+      "status_changed_at": "...",
+      "revoked_reason": null,
       "created_at": "...",
       "created_by_device": "...",
       "note": "rotated",
       "fields": { "...型別專屬欄位..." }
     },
-    { "version": 1, "...": "..." }
+    { "version": 1, "status": "retired", "...": "..." }
   ]
 }
 ```
+
+- `rev`、`parent_rev`、`merge_parents` 必須與檔案標頭及 appProperties 一致，解密後比對，不一致即 CORRUPTED。
+- 狀態在**每個版本**上：`active` / `retired` / `revoked`。帳密型 Item 的版本只有 `active`（目前）與 `retired`（歷史）。
+- `conflict` 不存在檔案內；衝突是本機從修訂鏈推導的狀態，存於 `sync_state.json`。
 
 **各型別 `fields`**
 
@@ -782,7 +917,7 @@ JSON，明文可讀（不含機密）：
     {
       "id": "...", "type": "key_pair", "name": "prod-web-01-deploy",
       "tags": ["prod"], "status": "active", "updated_at": "...",
-      "current_version": 2, "expires_at": null, "conflict": false,
+      "current_version": 2, "expires_at": null, "head_rev": "...",
       "summary": { "fingerprint_sha256": "SHA256:...", "algorithm": "ed25519" }
     }
   ]
@@ -801,8 +936,12 @@ JSON，明文可讀（不含機密）：
       "id": "...", "name": "prod-web-01", "address": "203.0.113.10",
       "ssh_port": 22, "environment": "prod", "tags": [], "notes": "",
       "host_key_fingerprint": "SHA256:...",
-      "keys": [
-        { "item_id": "...", "remote_user": "deploy", "usage": "部署", "bound_at": "..." }
+      "bindings": [
+        {
+          "item_id": "...", "key_version": 2, "remote_user": "deploy", "usage": "部署",
+          "deploy_state": "installed",
+          "declared_at": "...", "installed_at": "...", "removal_pending_since": null, "removed_at": null
+        }
       ],
       "created_at": "...", "updated_at": "..."
     }
@@ -812,7 +951,44 @@ JSON，明文可讀（不含機密）：
 
 ### 8.6 操作紀錄內容
 
-每筆：`{ "at", "device_id", "action", "item_id?", "item_name?", "result", "details?" }`。`action` 例如 `item.create`、`item.update`、`key.export_private`、`key.rotate`、`key.revoke`、`sync.conflict`、`vault.password_change`。
+每筆：`{ "at", "device_id", "action", "item_id?", "item_name?", "result", "details?" }`。`action` 例如 `item.create`、`item.update`、`key.export_private`、`key.rotate`、`key.revoke`、`sync.conflict`、`sync.rollback_suspected`、`vault.password_change`、`vault.rekey_start`、`vault.rekey_commit`。
+
+### 8.7 加密備份檔格式（可獨立解鎖）
+
+備份檔必須在沒有任何其他資訊的情況下，只憑主密碼或復原金鑰就能解開。因此外層以明文保存解鎖所需的一切，內層才是資料。
+
+```
+偏移  長度        欄位
+0     4           magic "HSMB"
+4     1           format（1）
+5     4           outer_len（big-endian）
+9     outer_len   outer_json（UTF-8 明文）
+9+L   ...         inner：一個 8.2 格式的加密檔案，kind = 5（backup），file_id = 固定 UUID，
+                  rev = 此備份的 UUID，parent_rev = 全零，generation = outer_json 中的 gen
+```
+
+`outer_json`：
+
+```json
+{
+  "format": 1,
+  "vault_id": "...",
+  "exported_at": "...",
+  "exported_by_device": "...",
+  "gen": 1,
+  "wrappings": { "password": { "kdf": {...}, "nonce": "...", "wrapped_vk": "..." },
+                 "recovery": { "enabled": true, "hkdf_salt": "...", "nonce": "...", "wrapped_vk": "..." } },
+  "vk_check": { "nonce": "...", "ciphertext": "..." },
+  "naming": { ... },
+  "contents": { "items": 123, "hosts": 4, "log": true, "trash": false }
+}
+```
+
+- `wrappings` 與 `vk_check` 直接複製自匯出當時標頭的 `active` 世代，因此備份用的是**同一把 VK、同一個主密碼與復原金鑰**；匯出時也可選擇以獨立的備份密碼另行包裝（`--backup-password`），此時 `wrappings.password` 為以該密碼推導的 PK 包裝。
+- **完整性**：inner 檔案的 AAD 除了自己的 150-byte 標頭外，再串接 `SHA-256(outer_json bytes)`。竄改外層任何 byte（例如改 KDF 參數、換成別的包裝）都會使 inner 驗證失敗。
+- inner 明文為 JSON：`{ "header_naming", "index", "hosts", "log?", "items": [ 每個 Item 的完整 JSON（8.3）], "trash?": [...] }`。
+- 還原流程：解析外層 → 參數上限檢查 → 以主密碼或復原金鑰解開 VK → 驗證 `vk_check` → 解密 inner → 在目標位置建立新 Vault（新的 rev 鏈，同一 VK 或由使用者選擇產生新世代）。
+- 驗收：FR-BAK-05 的「全新電腦、無快取、無 Google」情境為自動化測試。
 
 ---
 
@@ -834,8 +1010,9 @@ JSON，明文可讀（不含機密）：
 | 新增 / 編輯對話框 | 依型別切換欄位；密碼產生器內嵌 | P0 |
 | 金鑰產生對話框 | 名稱、演算法、用途、註解、passphrase | P0 |
 | 匯入精靈 | 來源選擇（Chrome CSV / Chrome 設定檔 / 其他密碼管理器 / 私鑰檔 / ~/.ssh 掃描）→ 預覽與勾選 → 匯入報告 | P0（Chrome 設定檔與其他管理器為 P1） |
-| 同步與狀態 | pending、衝突列表（逐筆比較、選擇保留）、到期與逾期輪替提醒、missing 項目 | P0 |
-| 設定 | 自動鎖定時間、剪貼簿清除秒數、Drive 資料夾資訊、Google 授權狀態與撤銷、變更主密碼、重新產生復原金鑰、語言 | P0 |
+| 同步與狀態 | pending、衝突列表（逐欄位並排比較、選擇保留或逐欄挑選）、疑似回滾警示、到期與逾期輪替提醒、missing 項目、伺服器端待處理清單（removal_pending 綁定） | P0 |
+| 設定 | 自動鎖定時間、剪貼簿清除秒數、Drive 資料夾資訊、Google 授權狀態與撤銷、變更主密碼、重新產生復原金鑰、語言、索引摘要雜湊與最後修訂時間（供跨裝置人工比對） | P0 |
+| 設定 → 全面輪替 | 說明與主密碼變更的差異、啟動、進度（已遷移 / 總數）、續行、取消 | P1 |
 | 設定 → Drive 命名 | 顯示目前資料夾路徑與各檔案名稱；修改資料夾路徑（搬移）與命名規則（重新命名所有檔案），顯示進度與失敗重試 | P1 |
 | 操作紀錄 | 依時間、操作、Item 篩選 | P1 |
 | 系統匣選單 | 快速搜尋、鎖定、開啟主視窗、結束 | P1 |
@@ -853,6 +1030,7 @@ JSON，明文可讀（不含機密）：
 #### 9.2.1 基本
 
 - 執行檔名稱：`hsm`（待決議 Q-03）。
+- CLI 為 Phase 2 交付（第 12 章）；本節為完整目標規格。
 - 全域選項：`--vault NAME`、`--offline`、`--json`、`--quiet`、`--config PATH`。
 - 環境變數：`HSM_VAULT`、`HSM_PASSWORD_FILE`（從檔案讀主密碼，供腳本使用，文件須警告風險）。
 - 輸出：預設人類可讀，`--json` 輸出 JSON 供腳本使用。
@@ -877,23 +1055,27 @@ hsm vault move --drive-folder PATH # P1
 hsm vault change-password
 hsm vault recovery regenerate
 hsm vault recovery unlock          # 以復原金鑰解鎖並重設主密碼
+hsm vault rekey [--new-recovery-key]   # 全面輪替（新世代），可中斷續行；P1
+hsm vault rekey --status | --resume | --abort
 
 # 同步與狀態
 hsm sync [--rebuild-index]
 hsm status                         # pending、衝突、到期、逾期輪替、missing
 hsm resolve <name> --keep local|remote|<version>
 hsm verify
-hsm gc [--older-than 30d]
+hsm gc [--older-than 30d] [--purge-header-history] [--purge-generation N]
 
 # 帳密與通用項目
 hsm list [--type TYPE] [--tag TAG] [--status S]
 hsm search <query>
-hsm add <name> --type credential [--username U] [--password P | --generate [--length N] | --stdin] [--url URL] [--tag T ...]
-hsm add <name> --type generic [--from-file PATH | --field k=v ...]
+hsm add <name> --type credential [--username U] [--generate [--length N] | --stdin | --password-file PATH] [--url URL] [--tag T ...]
+                                   # 未給密碼來源時以隱藏輸入提示；沒有 --password VALUE 這種參數
+hsm add <name> --type generic [--from-file PATH | --fields-json PATH | --field KEY ...]
+                                   # --field KEY 只給欄位名稱，值以隱藏輸入提示
 hsm show <name> [--version N]      # 顯示非機密欄位與版本列表
 hsm get <name> [--field password] [--version N] [--copy | --stdout]
 hsm totp <name> [--copy]
-hsm edit <name> [--username U] [--password P | --generate | --stdin] [--url URL] [--notes N] [--expires DATE]
+hsm edit <name> [--username U] [--generate | --stdin | --password-file PATH | --prompt-password] [--url URL] [--notes-file PATH] [--expires DATE]
 hsm tag <name> [--add T] [--remove T]
 hsm rename <name> <new-name>
 hsm versions <name>
@@ -909,10 +1091,11 @@ hsm key import-public <name> --public-key PATH
 hsm key show <name>                # metadata、公鑰、指紋、版本、綁定主機
 hsm key public <name> [--format openssh|pem] [--out PATH | --copy]
 hsm key private <name> [--format openssh|pkcs8|pkcs1] [--out PATH | --stdout] [--version N] [--force] [--strip-passphrase]
+                                   # 預設只匯出 active 版本；retired 需 --version 並警告；revoked 需 --force
 hsm key install <name> [--dir ~/.ssh] [--ssh-config --host HOSTNAME]
 hsm key ssh-add <name> [--lifetime 1h]
 hsm key rotate <name> [--note TEXT]
-hsm key revoke <name> --reason TEXT
+hsm key revoke <name> [--version N | --all] --reason TEXT   # 本機標記；受影響的 installed 綁定變為 removal_pending
 hsm key find --fingerprint SHA256:...
 
 # TLS 憑證
@@ -928,13 +1111,16 @@ hsm host add <name> --address ADDR [--port N] [--env ENV] [--host-key-fingerprin
 hsm host show <name>
 hsm host edit <name> [...]
 hsm host rm <name>
-hsm host bind <host> <key> --remote-user USER [--usage TEXT]
-hsm host unbind <host> <key>
-hsm host authorized-keys <host> [--out PATH]
+hsm host bind <host> <key> [--version N] --remote-user USER [--usage TEXT]
+hsm host unbind <host> <key> [--version N] --remote-user USER
+hsm host deploy-state <host> <key> --version N --remote-user USER --set declared|installed|removal_pending|removed
+hsm host pending                   # 所有 removal_pending 綁定（伺服器端待處理清單）
+hsm host authorized-keys <host> [--out PATH]   # 只含 active 版本，retired/revoked 仍 installed 者以註解警告
 
 # 備份與匯入匯出
-hsm export --encrypted --out PATH
+hsm export --encrypted --out PATH [--backup-password] [--include-log] [--include-trash]
 hsm export --plain --out PATH      # 二次確認
+hsm restore --from PATH [--to-drive-folder PATH | --to-local DIR]   # 可在全新電腦、無 Google 授權下執行
 hsm import --from PATH [--format hsm|chrome-csv|bitwarden|1password|keepass|firefox-csv|edge-csv] [--on-duplicate version|skip|new] [--dry-run]
 hsm import --chrome [--profile NAME] [--on-duplicate ...] [--dry-run]   # 直接讀取 Chrome 設定檔（P1）
 
@@ -945,8 +1131,9 @@ hsm log [--since T] [--action A] [--item NAME] [--limit N]
 #### 9.2.3 行為規範
 
 - `get`、`key private`、`cert export` 預設寫檔或複製到剪貼簿；輸出到 stdout 需明確 `--stdout`，且 stdout 為終端時再次確認。
-- `--password P` 之類在命令列直接帶機密的參數，文件須警告會留在 shell history，建議用 `--stdin` 或 `--generate`。
+- **沒有任何參數接受命令列明文機密**（密碼、passphrase、TOTP 秘密、欄位值）。機密只能來自隱藏輸入提示、`--stdin`、`--password-file PATH`（檔案須為僅本人可讀，否則拒絕）或 `--generate`。這避免機密進入 shell history、程序參數列表與行程監控工具。
 - 所有需要主密碼的指令在非 TTY 且無 agent、無 `HSM_PASSWORD_FILE` 時，以結束碼 3 失敗。
+- 任何會寫入含明文機密檔案的指令，都以 5.3 的「建立時即為僅本人可讀」方式建立檔案。
 - 結束碼：0 成功、1 一般錯誤、2 參數錯誤、3 未解鎖或主密碼錯誤、4 Google 授權失效、5 網路或 Drive 錯誤、6 存在衝突需處理。
 
 ---
@@ -957,10 +1144,10 @@ hsm log [--since T] [--action A] [--item NAME] [--limit N]
 |------|------|
 | 效能 | 解鎖（Argon2id 推導）在一般筆電上 1–2 秒；已解鎖且索引已快取時，`get` 在 200 ms 內完成（不含 Drive 往返）；完整同步 500 個 Item 在 60 秒內完成。 |
 | 容量 | 目標：單一 Vault 2,000 個 Item、每 Item 10 版本、操作紀錄 5,000 筆；單次 Chrome 匯入 2,000 筆在 30 秒內完成預覽。 |
-| 可靠性 | 任何時刻程序被中斷（Ctrl-C、斷電）都不得造成已確認寫入的資料遺失；寫入快取採「寫暫存檔再 rename」。 |
+| 可靠性 | 任何時刻程序被中斷（Ctrl-C、斷電、斷線）都不得造成已確認寫入的資料遺失；寫入快取採「寫暫存檔再 rename」；Drive 上的資料從不就地覆寫；全面輪替在任一步中斷後重啟皆可續行或明確回復。 |
 | 相容性 | Linux x86_64 / arm64、macOS（Intel / Apple Silicon）、Windows 10+。桌面應用程式以各平台原生安裝檔發布（`.dmg`、`.msi`、`.AppImage` / `.deb`）。 |
 | 互通性 | 匯出的 OpenSSH 金鑰需能被 `ssh-keygen -y`、`ssh-add` 正確讀取；PEM 需能被 `openssl` 讀取。 |
-| 測試 | 加密層與檔案格式單元測試覆蓋率 ≥ 90%；同步引擎以本機資料夾儲存層做整合測試，涵蓋衝突情境；金鑰匯入匯出與 OpenSSH / OpenSSL 做互通測試。 |
+| 測試 | 加密層與檔案格式單元測試覆蓋率 ≥ 90%；金鑰匯入匯出與 OpenSSH / OpenSSL 做互通測試；下列**復原導向驗收測試**為 Phase 1a 的結束條件，比覆蓋率更優先：(a) 變更主密碼與全面輪替的每一個步驟之後強制中斷，重啟後 Vault 必須仍可用主密碼與復原金鑰開啟且資料完整；(b) 兩台模擬裝置離線各自修改同一 Item、同一 hosts、同時改密碼，上線後必須偵測分支且雙方資料皆保留；(c) 清空本機環境、不給 Google 授權，只用備份檔加主密碼或復原金鑰還原，所有 Item 與金鑰可讀；(d) 竄改檔案長度欄位、KDF 參數、parent_rev 與回滾整份資料，工具必須拒絕並給出對應錯誤碼；(e) 寫入私鑰與明文匯出時在 Windows 與 Unix 驗證檔案建立瞬間即為僅本人可讀。同步引擎以本機資料夾儲存層做整合測試。 |
 | 相依性 | 不依賴專案方任何線上服務；除 Google Drive API 外不連線其他主機（含不做自動更新檢查，除非使用者明確啟用）。 |
 | 可觀測性 | `--verbose` 輸出 Drive API 呼叫摘要（方法、檔案 ID、狀態碼），永不輸出內容或 token。 |
 | 國際化 | CLI 訊息繁體中文與英文雙語，預設依系統語系，`HSM_LANG` 可覆寫。 |
@@ -990,14 +1177,17 @@ hsm log [--since T] [--action A] [--item NAME] [--limit N]
 
 ## 12. 開發階段規劃
 
+第一版的核心問題是「電腦壞掉後，密碼與金鑰拿不拿得回來」。因此 Phase 1 先做金鑰結構、獨立備份還原、中斷復原與同步衝突，並以第 10 章的復原導向驗收測試作為結束條件；自動安裝 SSH、agent、便利功能之後再加。
+
 | 階段 | 目標 | 主要交付 | 對應需求 |
 |------|------|----------|----------|
 | **Phase 0：確認** | 規格審閱、技術選型定案、建立 Google Cloud OAuth client、repo 骨架 | 本文件 1.0、CI 流程、專案結構、儲存層介面定義 | 第 13 章全部 |
-| **Phase 1：MVP** | 桌面應用程式在單一裝置可完整使用，第二裝置可連接同步 | Core：加密層與檔案格式、Vault 建立與解鎖、復原金鑰、Google 授權與資料夾建立、帳密與通用 Item、金鑰產生 / 匯入 / 掃描 / 匯出 / 安裝 / 輪替 / 撤銷、Host 綁定與 authorized_keys 輸出、同步與衝突、離線快取、加密備份匯出匯入、Chrome CSV 匯入、操作紀錄。GUI：9.1.1 所有 P0 畫面、自動鎖定、剪貼簿清除、拖放匯入 | 所有 P0 |
-| **Phase 2：日常順手** | CLI、減少摩擦、增加安全提醒 | CLI 與 agent、Chrome 設定檔直接讀取、其他密碼管理器匯入、變更主密碼、ssh-add、TOTP、到期與輪替提醒、指紋反查、verify、軟刪除垃圾桶、Drive 狀態顯示、系統匣、操作紀錄畫面 | 所有 P1 |
+| **Phase 1a：核心與復原** | Core 程式庫在本機資料夾儲存層與 Google Drive 上通過全部復原導向驗收測試 | 三層金鑰結構與標頭、8.2 檔案格式與硬性上限、不可覆寫修訂與分支偵測、回滾防護、衝突合併修訂、變更主密碼、復原金鑰、可獨立解鎖的備份與還原、Google 授權與資料夾建立、命名規則、帳密 / 通用 / 金鑰 / 憑證 / hosts 的資料模型與讀寫、金鑰產生 / 匯入 / 匯出（含每版本狀態與部署狀態）、Chrome CSV 匯入引擎、操作紀錄、Windows ACL 與 Unix 權限、驗收測試 (a)–(e) | 5.1、5.3、8、4.5、4.6 的 P0 |
+| **Phase 1b：桌面介面** | 桌面應用程式在單一裝置可完整使用，第二裝置可連接同步 | 9.1.1 所有 P0 畫面、5.6 GUI 強化、自動鎖定、剪貼簿清除、拖放匯入、衝突並排處理、伺服器端待處理清單 | 其餘 P0 |
+| **Phase 2：日常順手** | CLI、自動安裝、提醒 | CLI 與 agent（5.6）、`key install`、ssh-add、全面輪替、Chrome 設定檔直接讀取、其他密碼管理器匯入、TOTP、到期與輪替提醒、指紋反查、verify、垃圾桶、Drive 狀態、系統匣、操作紀錄畫面 | 所有 P1 |
 | **Phase 3：擴充** | 進階整合 | 多 Vault、背景同步、Host 掃描與公鑰推送、附件型 Item、PuTTY 匯出、其他 Chromium 瀏覽器匯入、全域快捷鍵、其他儲存後端、檔案大小填充 | P2 |
 
-每階段結束條件：對應需求的自動化測試全部通過、第 5 章安全檢查逐項確認、使用文件更新。
+每階段結束條件：對應需求的自動化測試全部通過、第 5 章安全檢查逐項確認、使用文件更新。Phase 1a 另外要求驗收測試 (a)–(e) 全數通過後才開始 Phase 1b。
 
 ---
 
@@ -1020,6 +1210,10 @@ hsm log [--since T] [--action A] [--item NAME] [--limit N]
 | Q-11 | 是否需要支援 Google Workspace 帳號的共用雲端硬碟（Shared Drive） | 第一版不支援，只用 My Drive | 7.2 |
 | Q-14 | 預設名稱：資料夾 `HolienSecretsManager`、檔案 `vault.hsm` / `index.enc` / `log.enc` / `hosts.enc` / `items/{id}.enc` 是否合適 | 採用上述預設；若 Q-03 改了執行檔名稱，副檔名 `.hsm` 一併更名 | 7.3 |
 | Q-15 | 命名規則是否允許每台裝置各自不同（只存本機設定） | 否，存於 Vault 標頭、所有裝置一致，避免同一 Vault 在不同裝置產生不同檔名 | FR-DRIVE-13 |
+| Q-16 | 修訂保留數量與期限（每檔至少 20 個、30 天） | 採用；GUI 可調 | FR-SYNC-12 |
+| Q-17 | 全新裝置首次同步的回滾辨識：是否要在標頭加入「索引摘要雜湊 + 簽章」等機制 | 第一版不做，以人工比對緩解（FR-SYNC-11）；列為 Phase 3 研究 | FR-SYNC-10/11 |
+| Q-18 | 備份檔是否預設包含操作紀錄 | 預設不含（紀錄含 Item 名稱與時間，但不含機密值；由使用者決定） | FR-BAK-07 |
+| Q-19 | 全面輪替是否也要重新產生復原金鑰 | 預設詢問；懷疑復原金鑰外洩時必須 | 5.1.6 |
 
 ---
 
@@ -1046,7 +1240,15 @@ hsm log [--since T] [--action A] [--item NAME] [--limit N]
 | 1 | `CONFLICT_NAME` | 名稱重複 |
 | 1 | `KEY_REVOKED` | 金鑰已撤銷，需 `--force` |
 | 1 | `INVALID_KEY_MATERIAL` | 私鑰 / 憑證無法解析或不匹配 |
-| 1 | `CORRUPTED` | 檔案格式錯誤或 GCM 驗證失敗 |
+| 1 | `CORRUPTED` | 檔案格式錯誤、長度不符、GCM 驗證失敗或標頭與內容不一致 |
+| 1 | `CORRUPTED_CHAIN` | 修訂鏈有環或缺少 parent |
+| 1 | `UNSUPPORTED_FORMAT` | 檔案格式版本高於本程式支援 |
+| 3 | `KDF_PARAMS_UNSAFE` | 標頭或備份檔的 KDF 參數超過硬性上限，拒絕執行 |
+| 6 | `ROLLBACK_SUSPECTED` | Drive 上的修訂鏈不包含本機信任點 |
+| 6 | `HEADER_BRANCHED` | 標頭有多個 head，需使用者選擇 |
+| 6 | `REKEY_IN_PROGRESS` | 全面輪替進行中，需先續行或取消 |
+| 6 | `STALE_GENERATION` | 本機所持 VK 世代已非目前有效世代，需重新解鎖 |
+| 1 | `PERMISSION_UNSAFE` | 目標檔案或目錄無法以僅本人可讀方式建立 |
 | 1 | `UNSAFE_PATH` | 目標目錄權限不安全 |
 | 1 | `IMPORT_PARSE` | 匯入檔案格式無法解析 |
 | 1 | `CHROME_PROFILE_NOT_FOUND` | 找不到 Chrome 設定檔 |
