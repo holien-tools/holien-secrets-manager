@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |------|------|
-| 文件版本 | 0.10.0（草稿） |
+| 文件版本 | 0.11.0（草稿） |
 | 狀態 | 待審閱 |
 | 最後更新 | 2026-10-28 |
 | 適用範圍 | 全專案（單機桌面應用程式、CLI、Google Drive 儲存層） |
@@ -16,6 +16,8 @@
 > 0.4.0 版變更：Drive 上的**資料夾名稱與所有檔案名稱皆由使用者自訂**，系統只提供預設值；檔案辨識改以 Drive 檔案屬性為準，不依賴檔名。
 >
 > 0.5.0 版變更：新增 5.1.1 至 5.1.6，逐步說明存放檔案的**加密與解密流程**、金鑰推導、主密碼變更與復原。
+>
+> 0.11.0 版變更（新增功能）：**資料夾**（使用者自訂的階層資料夾，Item 可歸類與移動）；**選擇性匯出**（勾選 Item 或資料夾匯出，匯入時合併並保留資料夾結構）；**區網點對點傳送**（輸入對方區網 IP，雙方比對短驗證碼建立加密通道，傳送方再驗證主密碼或 TOTP 後才送出，接收方預覽後依原資料夾結構存入）。新增 4.9、5.7、8.8 至 8.10 與對應的畫面、指令、測試、待決議。
 >
 > 0.10.0 版變更（依第五輪外部審閱意見）：每把 VK 有全域唯一 `key_id`，資料修訂標頭改記 `key_id`，世代號只負責排序；輪替開始時在標頭記錄各邏輯檔案 head 的**快照**，遷移只處理快照內的 head；**子修訂的世代低於父修訂一律拒絕**；外洩輪替中快照之外出現的舊世代修訂只**隔離**不自動遷移；定義並行輪替的合併（保留雙方金鑰）與標頭的多父合併格式；解鎖、改密碼、復原金鑰、agent 全部改為處理「所有未清除金鑰的集合」，區分 top（MAC）與 active（寫入）；新增三個驗收案例。
 >
@@ -80,12 +82,14 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
 - 多台裝置透過同一 Google 帳號與同一主密碼存取同一份資料，含同步與衝突處理。
 - SSH / TLS 金鑰對的產生、匯入、匯出、指紋計算、輪替、撤銷、主機綁定。
 - 從 Chrome 匯入已儲存的網址、帳號與密碼。
+- 使用者自訂的階層資料夾，像書籤一樣整理 Item；可勾選 Item 或資料夾做選擇性匯出。
+- 區網點對點傳送：把選定的 Item 直接傳給同一區網上另一位使用者的應用程式，不經過任何伺服器或雲端。
 - 本機離線快取與本機操作紀錄。
 - 桌面圖形介面（主要介面）與 CLI（輔助，供終端機與腳本使用），兩者共用同一核心程式庫。
 
 **排除範圍（Out of Scope）**
 
-- 多使用者、團隊共享、權限管理。
+- 多使用者、團隊共享、權限管理。區網傳送是一次性的複製，傳出後兩邊各自獨立，不是共享、不同步。
 - 自架伺服器、伺服器端 API。
 - 自動將金鑰推送部署到目標伺服器（第三階段評估）。
 - 憑證簽發（CA）功能。
@@ -103,6 +107,9 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
 | Credential（帳密） | Item 的一種型別，由帳號、密碼、網址、備註等欄位組成。 |
 | Key Pair（金鑰對） | Item 的一種型別，包含私鑰、公鑰、演算法、指紋等欄位。 |
 | Host（主機） | 一台伺服器的紀錄，可與多把金鑰綁定。 |
+| Folder（資料夾） | 使用者自訂的階層分類，像瀏覽器書籤資料夾。每個 Item 屬於一個資料夾（或根）。資料夾只是整理方式，不影響加密與權限。 |
+| 傳送工作階段（Transfer Session） | 一次區網點對點傳送：傳送方 A 與接收方 B 之間建立的一條加密、經雙方確認的連線，傳完即結束。 |
+| SAS | Short Authentication String，由雙方共同推導、顯示在兩邊螢幕上的短驗證碼，用於確認通道沒有被中間人攔截。 |
 | Vault（保險庫） | 一份完整資料集，對應 Google Drive 上的一個資料夾。一位使用者通常只有一個 Vault，但允許多個（例如工作與個人分開）。 |
 | Version（版本） | Item 的值每次變更即產生一個新版本，舊版本保留供回溯。 |
 | Master Password（主密碼） | 使用者記憶的唯一密碼，用於推導 PK。主密碼與復原金鑰皆遺失即無法解密資料。 |
@@ -144,6 +151,9 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
 | UC-09 | 使用者匯出整個 Vault 為加密備份檔，離線保存於 USB 隨身碟。 |
 | UC-10 | 使用者在 Chrome 的密碼管理器匯出 CSV，拖進應用程式視窗，預覽後匯入數百筆網址與帳密，重複項目自動合併。 |
 | UC-11 | 使用者在應用程式中點「從 Chrome 匯入」，應用程式自動找到本機的 Chrome 設定檔，直接讀取並解密已儲存的帳密，不需手動匯出 CSV。 |
+| UC-12 | 使用者建立「工作/客戶甲」、「工作/客戶乙」、「個人/購物」等資料夾，把帳密拖進去，並把匯入的 Chrome 帳密整批移到「Chrome 匯入」資料夾下。 |
+| UC-13 | 使用者只想備份「工作/客戶甲」這個資料夾，在匯出畫面勾選它，產生一個只含該資料夾及其子資料夾內容的加密檔。 |
+| UC-14 | 使用者 A 要把「專案 X」資料夾裡的帳密交給同事 B。B 在自己的應用程式按「接收」，畫面顯示 B 的區網 IP；A 輸入該 IP，兩邊螢幕出現相同的六位驗證碼，B 口頭唸給 A 核對；A 再輸入一次主密碼（或 Google Authenticator 的驗證碼）後送出；B 看到清單、確認後，資料以「來自 A/專案 X/…」的結構存進 B 的 Vault。 |
 
 ---
 
@@ -203,6 +213,24 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
 | FR-CRED-07 | P1 | 可設定到期日，`status` 指令列出到期前 N 天（預設 14 天）的項目。 |
 | FR-CRED-08 | P1 | 以名稱、標籤、網址模糊搜尋。 |
 | FR-CRED-09 | P2 | 附件型 Item（任意檔案），單一附件上限預設 5 MB。 |
+
+#### 4.3.1 資料夾（FOLDER）
+
+資料夾適用於所有 Item 型別，但主要為帳密整理而設。資料夾只是整理方式：不改變加密、不改變同步單位、不是權限邊界。
+
+| 編號 | 優先 | 需求 |
+|------|:--:|------|
+| FR-FOLDER-01 | P0 | 使用者可建立、重新命名、移動、刪除階層資料夾；名稱在同一父資料夾內唯一，不得含 `/`，長度 ≤ 100。深度上限 16。 |
+| FR-FOLDER-02 | P0 | 每個 Item 屬於一個資料夾或根目錄（`folder_id` 為 null）。Item 可在資料夾間移動；移動只改 Item 的 `folder_id`，不改名、不產生新版本的機密欄位。 |
+| FR-FOLDER-03 | P0 | 資料夾以 UUID 識別，名稱可改；改名或搬移資料夾不需要改寫其中的 Item。 |
+| FR-FOLDER-04 | P0 | 刪除非空資料夾時詢問：把內容移到父資料夾，或一併移入垃圾桶（Item 走軟刪除）。 |
+| FR-FOLDER-05 | P0 | 列表與搜尋可依資料夾篩選，含「包含子資料夾」選項；資料夾樹顯示各資料夾的 Item 數。 |
+| FR-FOLDER-06 | P0 | 以路徑字串參照資料夾（例如 `工作/客戶甲`），以 `/` 分隔；CLI 的 `--folder PATH` 在路徑不存在時可加 `--create-parents` 逐層建立。 |
+| FR-FOLDER-07 | P0 | 匯入（Chrome、其他密碼管理器、選擇性匯出檔、區網傳送）可指定目標資料夾；預設為 `匯入/<來源>/<日期>`，使用者可改。 |
+| FR-FOLDER-08 | P0 | 資料夾定義存於獨立邏輯檔案 `folders`（8.8），同步與衝突處理同 hosts；兩台裝置同時改資料夾樹時，名稱不衝突的變更自動合併，同一資料夾的改名衝突交由使用者。 |
+| FR-FOLDER-09 | P0 | Item 的 `folder_id` 指向不存在的資料夾（例如另一台裝置已刪除）時，顯示在「未分類」虛擬資料夾下，不遺失。 |
+| FR-FOLDER-10 | P1 | 拖放移動（GUI）、多選批次移動、資料夾顏色或圖示。 |
+| FR-FOLDER-11 | P2 | 智慧資料夾（以標籤或搜尋條件定義的虛擬資料夾）。 |
 
 ### 4.4 伺服器金鑰管理（KEY）
 
@@ -299,6 +327,18 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
 | FR-BAK-05 | P0 | 備份驗收條件：在**全新電腦、沒有原本快取、無法登入原 Google 帳號**的情況下，僅憑備份檔加主密碼（或復原金鑰）即可還原為可用的 Vault，可還原到新的 Drive 資料夾或本機資料夾。此條件為自動化測試。 |
 | FR-BAK-06 | P0 | 備份檔內容為所有檔案的 head 修訂與各 Item 保留的版本；`import` 還原時以新的 rev 鏈重新寫入，不保留原修訂歷史。 |
 | FR-BAK-07 | P1 | 匯出時可選擇是否包含操作紀錄與垃圾桶中的項目。 |
+
+#### 4.6.2 選擇性匯出與合併匯入（SELECT）
+
+| 編號 | 優先 | 需求 |
+|------|:--:|------|
+| FR-SEL-01 | P0 | 匯出畫面以資料夾樹加核取方塊呈現；可勾選個別 Item、整個資料夾（預設含子資料夾，可取消）、或全部。勾選資料夾時列出將匯出的 Item 數。 |
+| FR-SEL-02 | P0 | 選擇性匯出產生與完整備份相同外層格式的檔案（8.7），`contents.partial = true`，內層只含被選的 Item、它們所在資料夾到根的路徑定義、以及與被選金鑰相關的 Host 綁定（Host 本身一併附上）。 |
+| FR-SEL-03 | P0 | 選擇性匯出支援加密（預設，以本 Vault 金鑰或 `--backup-password` 指定的獨立密碼）與明文 JSON（需二次確認）。加密的選擇性匯出檔**不是**完整備份，不能用於還原整個 Vault；介面須明確標示。 |
+| FR-SEL-04 | P0 | 匯入選擇性匯出檔時為**合併**而非還原：在使用者指定的目標資料夾下重建檔內的資料夾路徑，Item 寫入為本 Vault 的新 Item（新的 id 與 rev 鏈，以本 Vault 的 active 金鑰加密）。 |
+| FR-SEL-05 | P0 | 合併時的重複判斷與 Chrome 匯入相同（FR-CHROME-04：正規化網址 + 帳號；金鑰以指紋）；預設「密碼不同則為既有 Item 新增版本」，可改為跳過或另建。匯入前預覽，匯入後報告。 |
+| FR-SEL-06 | P0 | 合併匯入的 Item 自動加上 `imported:<來源>` 標籤與匯入日期標籤；若匯出檔含版本歷史，預設只匯入目前版本，可選擇包含歷史版本。 |
+| FR-SEL-07 | P1 | 匯出時可選擇「只含公鑰」（金鑰型 Item 不匯出私鑰），供交付公鑰清單使用。 |
 | FR-BAK-02 | P0 | `export --plain`：匯出為明文 JSON，需二次確認並顯示警告；輸出檔以僅本人可讀方式建立（5.3）。 |
 | FR-BAK-03 | P1 | 從其他密碼管理器的匯出檔匯入（Bitwarden JSON / CSV、1Password CSV、KeePass XML、Firefox 與 Edge CSV）。 |
 | FR-BAK-04 | P1 | `verify`：下載所有 Item 並驗證解密與完整性，回報損毀項目。 |
@@ -355,6 +395,26 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
 | FR-UI-06 | P1 | CLI 互動式提示在非 TTY 環境自動改為錯誤回報，不會卡住。 |
 | FR-UI-07 | P1 | 系統匣常駐：快速搜尋、複製、鎖定；關閉視窗時縮到系統匣。 |
 | FR-UI-08 | P2 | 全域快捷鍵呼叫快速搜尋視窗。 |
+
+### 4.9 區網點對點傳送（XFER）
+
+讓使用者 A 把選定的 Item 直接傳給同一區網上使用者 B 的應用程式。沒有伺服器、沒有雲端中繼；兩邊各自有自己的 Vault、主密碼與 Google 帳號。這是資料第一次離開自己的 Vault 交到別人手上，因此規格以「傳送方明確授權、通道經雙方確認、接收方明確接受」為核心。安全設計見 5.7，協定訊息見 8.10。
+
+| 編號 | 優先 | 需求 |
+|------|:--:|------|
+| FR-XFER-01 | P1 | 接收方 B 進入「接收模式」後才開始監聽；畫面顯示 B 的區網 IP（多個介面全部列出）與連接埠，以及一組一次性的「接收代碼」（見 5.7）。離開接收模式或逾時（預設 10 分鐘）即停止監聽。平常不監聽任何連接埠。 |
+| FR-XFER-02 | P1 | 傳送方 A 輸入 B 的 IP 與連接埠（預設埠見 Q-22），以及 B 畫面上的接收代碼，建立連線。連線後兩邊螢幕各顯示一組 6 位數 SAS；任一方按「不符」即中止，雙方都按「相符」後通道才算建立。 |
+| FR-XFER-03 | P1 | A 在通道建立後、送出資料前，必須**再驗證**：重新輸入主密碼（以 `vk_check` 驗證），或輸入 Google Authenticator 等 TOTP 應用程式產生的驗證碼（需事先在設定啟用「傳送再驗證 TOTP」，見 FR-XFER-10）。再驗證結果只在本次傳送工作階段有效；連續失敗 5 次中止工作階段。 |
+| FR-XFER-04 | P1 | A 以資料夾樹勾選要傳送的 Item 或資料夾（同 FR-SEL-01）；可選擇金鑰型 Item 是否含私鑰（預設不含，含私鑰時額外警告）。 |
+| FR-XFER-05 | P1 | A 先送**清單**（Item 名稱、型別、資料夾路徑、大小，不含任何機密值）；B 看到清單與 A 的顯示名稱後，可逐筆取消勾選，按「接受」才通知 A 送出內容。B 未接受前 A 不送任何機密值。 |
+| FR-XFER-06 | P1 | B 選擇目標資料夾（預設 `來自 <A 的顯示名稱>/`），A 的資料夾結構在其下重建；Item 以 B 的 active 金鑰加密寫入 B 的 Vault，重複判斷與報告同 FR-SEL-05，並加上 `received-from:<A 顯示名稱>` 標籤。 |
+| FR-XFER-07 | P1 | 傳送內容在通道中以工作階段金鑰加密（5.7），在 B 端解密後直接以 B 的金鑰加密寫入快取，明文不落地；A 端也不產生任何暫存檔。 |
+| FR-XFER-08 | P1 | 雙方各自寫入操作紀錄：A 記「傳送給 <B 顯示名稱>, <B 指紋>, N 筆, Item 名稱清單」；B 記「接收自 <A 顯示名稱>, <A 指紋>, N 筆」。不記機密值。 |
+| FR-XFER-09 | P1 | 任何一步失敗（SAS 不符、再驗證失敗、連線中斷、B 拒絕、格式錯誤）即中止整個工作階段並清除記憶體中的工作階段金鑰；不自動重試，使用者需重新開始（B 需重新產生接收代碼）。 |
+| FR-XFER-10 | P1 | 「傳送再驗證 TOTP」：使用者可在設定中以 QR 碼把一組 TOTP 秘密加入 Google Authenticator 等應用程式；秘密以 Vault 金鑰加密存於 `settings` 邏輯檔案（8.9），各裝置共用。驗證允許前後各一個時間步，同一驗證碼不得重複使用。**此功能只是傳送前的再驗證閘門，不是 Vault 的第二因子**，介面與文件須如此說明。 |
+| FR-XFER-11 | P1 | 傳送大小上限預設 50 MiB；超過時要求分批。 |
+| FR-XFER-12 | P2 | 以 mDNS / DNS-SD 在區網自動發現處於接收模式的裝置，免手動輸入 IP；發現只提供候選，連線仍需接收代碼與 SAS。 |
+| FR-XFER-13 | P2 | 傳送 Host 紀錄與綁定關係（目前只隨金鑰附帶相關 Host）。 |
 
 ---
 
@@ -784,6 +844,67 @@ stable(m; ∅)
 5. 對 `unwrap_dek` 做速率限制（預設每秒 50 次），超過即暫停並記錄，避免被用來大量解包。
 6. agent 以目前使用者身分執行，不需也不可提權。
 
+
+### 5.7 區網傳送的安全設計
+
+**目標**：A 傳給 B 的內容只有 B 能讀；B 收到的內容確實來自 A 且未被改動；區網上的其他人（含能主動攔截流量的人）既讀不到也無法冒充任何一方；A 不會在未明確授權下送出資料；B 不會在未明確接受下寫入資料。
+
+**不依賴的東西**：沒有 CA、沒有帳號系統、沒有伺服器。身分只靠「兩個人在場（面對面或通話中）能比對螢幕上的短碼」。
+
+#### 5.7.1 通道建立
+
+```
+B（接收方）進入接收模式：
+  b_priv, b_pub = X25519.generate()
+  code = CSPRNG 產生 8 位數接收代碼（顯示給 B，B 告訴 A）
+  監聽 TCP 埠；顯示 IP 清單、埠、code
+
+A（傳送方）輸入 B 的 IP、埠、code：
+  a_priv, a_pub = X25519.generate()
+  → hello = { version, a_pub, a_name, a_vault_fp, nonce_a }
+B：
+  驗證 version；回 reply = { b_pub, b_name, b_vault_fp, nonce_b }
+雙方：
+  shared     = X25519(own_priv, peer_pub)
+  transcript = SHA-256("hsm-xfer-v1" || hello bytes || reply bytes)
+  prk        = HKDF-Extract(salt = SHA-256(code), ikm = shared || transcript)
+  k_a2b      = HKDF-Expand(prk, "a2b", 32)      # A → B 方向的 AES-256-GCM 金鑰
+  k_b2a      = HKDF-Expand(prk, "b2a", 32)
+  k_confirm  = HKDF-Expand(prk, "confirm", 32)
+  sas        = HKDF-Expand(prk, "sas", 4) mod 1_000_000，以 6 位數顯示
+  a_priv / b_priv / shared / prk 立即 zeroize
+確認：
+  A → B：HMAC(k_confirm, "A-confirm" || transcript)；B 驗證
+  B → A：HMAC(k_confirm, "B-confirm" || transcript)；A 驗證
+  兩邊顯示 sas；雙方都按「相符」後才進入下一步；任一方按「不符」→ 中止
+```
+
+- **接收代碼**的作用：它混入金鑰推導，使不知道代碼的人即使在區網上先連進 B，也得不到正確的金鑰，且會在確認步驟失敗；它也限制同一時間只有拿到代碼的人能與 B 配對。代碼只用一次、10 分鐘有效、三次錯誤即重新產生。
+- **SAS** 的作用：抵抗知道代碼的主動中間人（例如代碼被旁人聽到）。中間人要同時與 A、B 各建一條通道，兩條通道的 SAS 相同的機率為百萬分之一；不符即中止且不自動重試。
+- `a_vault_fp` / `b_vault_fp` 為各自 Vault ID 的 SHA-256 前 8 bytes，只用於操作紀錄與顯示，不作驗證。
+- 兩個方向用不同金鑰；每則訊息帶遞增序號作為 AES-GCM nonce 的一部分（8.10），防重放與重排。
+- 連線限制：接收模式下 B 同一時間只接受一條連線；完成或失敗即關閉並離開接收模式。
+
+#### 5.7.2 傳送方授權與接收方接受
+
+- A 的再驗證（FR-XFER-03）在通道確認之後、清單送出之前進行，且在 A 的本機完成：主密碼以 5.1.1 的 `vk_check` 驗證；TOTP 以 `settings` 中的秘密驗證。再驗證通過的狀態只綁定本次工作階段的 transcript，不能跨工作階段重用。
+- 為何通道確認在前：避免 A 在通道尚未可信時就被誘導輸入主密碼或驗證碼（雖然這兩者都不會離開本機，但失敗次數會累積，且使用者體驗上應先確認「對方是誰」）。
+- B 的接受（FR-XFER-05）是寫入 B Vault 的唯一觸發點；B 的介面在清單階段只顯示名稱、型別、資料夾、大小，絕不顯示機密值（A 尚未送出）。
+- A 送出的內容與 B 接受的清單必須一致：B 以清單中的 item_id 與雜湊核對收到的每筆內容，多出或不符即中止並丟棄已收部分。
+
+#### 5.7.3 威脅模型（區網傳送）
+
+| 威脅 | 防護 | 殘餘風險 |
+|------|------|----------|
+| 區網上的被動竊聽 | X25519 + AES-256-GCM | 無 |
+| 主動中間人 | 接收代碼混入金鑰推導；SAS 雙方比對；確認訊息 | 使用者未認真比對 SAS 時失效；文件須強調 |
+| 冒充 B 收資料 | A 必須輸入 B 螢幕上的接收代碼；SAS 比對 | 同上 |
+| 冒充 A 塞資料給 B | B 先看清單與 A 的顯示名稱、Vault 指紋再接受；SAS 比對 | B 可能接受不想要的內容，但只是多了幾個 Item，可刪除 |
+| A 的電腦處於解鎖狀態被旁人操作 | 傳送前再驗證（主密碼或 TOTP） | TOTP 裝置與電腦同時被取得時失效 |
+| B 的 Vault 被塞入惡意內容（例如含腳本的備註） | 內容以文字渲染（5.6）；匯入報告；標籤標示來源 | 無 |
+| 傳送內容殘留於磁碟 | 兩端皆不落地明文；B 直接以自己的金鑰加密寫入 | 作業系統換頁檔，與本機安全的既有限制相同 |
+| B 之後把資料轉傳或外洩 | 超出本工具範圍；A 傳出後即失去控制 | 文件須明確說明 |
+
 ---
 
 ## 6. 系統架構
@@ -801,6 +922,7 @@ stable(m; ∅)
 │  │ CLI      │───▶│ ├ 金鑰引擎    │    │ 保存 VK     │ │
 │  └──────────┘    │ ├ 同步引擎    │    └──────────────┘ │
 │                  │ ├ 匯入引擎    │                     │
+│                  │ ├ 傳送引擎    │◀── 區網 TCP ──▶ 另一位使用者的 HSM
 │                  │ └ 儲存層介面  │                     │
 │                  └──────┬───────┘                     │
 │            ┌────────────┼──────────────┐              │
@@ -894,12 +1016,15 @@ Windows 對應路徑為 `%APPDATA%\hsm\` 與 `%LOCALAPPDATA%\hsm\cache\`。
 | `index` | `index.enc` | `index` | 所有 Item 的摘要：id、名稱、型別、標籤、狀態、updated_at、目前版本號、到期日、綁定主機 | 是 | 任何 Item 新增、改名、改標籤、狀態變更 |
 | `log` | `log.enc` | `log` | 操作紀錄（滾動保留最近 5,000 筆） | 是 | 每次操作後（可批次延後上傳） |
 | `hosts` | `hosts.enc` | `hosts` | 所有 Host 紀錄與綁定關係 | 是 | Host 變更時 |
+| `folders` | `folders.enc` | `folders` | 資料夾樹（8.8） | 是 | 資料夾變更時 |
+| `settings` | `settings.enc` | `settings` | Vault 層級的使用者設定：傳送再驗證 TOTP 秘密、顯示名稱等（8.9） | 是 | 設定變更時 |
 | `items_folder` | `items` | `items_folder` | 存放 Item 檔案的子資料夾 | 不適用 | 建立時 |
 | `item_pattern` | `{id}.enc` | `item` | 單一 Item 的全部版本；`{id}` 替換為該 Item 的 UUID v4 | 是 | 該 Item 變更時 |
 
 - `{id}` 為 UUID v4，與 Item 內容無關。`item_pattern` 可為任意含 `{id}` 的樣式，例如 `IMG_{id}.jpg`、`{id}`（無副檔名）。所有命名規則鍵都可額外使用 `{rev}` 佔位符（修訂 UUID 前 8 碼）；不使用時，同一邏輯檔案的多個修訂在 Drive 上會是多個同名檔案（Drive 允許同名），工具以 `appProperties` 區分。
 - 每個邏輯檔案在 Drive 上是「一個或多個修訂檔案」。head 的判定見 7.4，不是「最新修改時間」。
 - `items_folder` 設為空字串時，Item 檔案直接放在 Vault 資料夾內，不建子資料夾。
+- 應用程式內的「資料夾」（4.3.1）與 Drive 上的資料夾無關：前者只是 `folders` 檔案內的邏輯分類，Drive 上的檔案配置不因此改變。
 - 工具讀寫檔案時一律先以 `appProperties`（`hsm.kind`、`hsm.vault_id`、`hsm.file_id`、`hsm.rev`、`hsm.parent_rev`、`hsm.gen`，合併修訂另有 `hsm.merge_parents`）查詢，並快取在 `sync_state.json`；檔名只在建立與重新命名時使用。
 - 所有檔案以 `multipart` 或 `resumable` 上傳；單檔小於 5 MB 用 multipart。
 - 修改命名規則（FR-DRIVE-16）流程：更新標頭 `naming` 並上傳 → 逐一 `files.update(name=...)` → 全部成功後更新本機快取的對應；任一步失敗時狀態畫面顯示「命名規則更新未完成」，可重試。
@@ -1095,9 +1220,9 @@ JSON，明文可讀（不含機密），整份以 HMAC 保護。標頭也是一�
 |------|------|------|------|
 | 0 | 4 | magic | ASCII `HSM1` |
 | 4 | 1 | format | 格式版本，目前為 1 |
-| 5 | 1 | kind | 1 = index、2 = item、3 = log、4 = hosts、5 = backup 內層 |
+| 5 | 1 | kind | 1 = index、2 = item、3 = log、4 = hosts、5 = backup 內層、6 = folders、7 = settings |
 | 6 | 16 | vault_id | UUID bytes |
-| 22 | 16 | file_id | Item 的 UUID；非 Item 檔案為固定 UUID（index、log、hosts、backup 各一） |
+| 22 | 16 | file_id | Item 的 UUID；非 Item 檔案為固定 UUID（index、log、hosts、backup、folders、settings 各一） |
 | 38 | 16 | rev | 此修訂的 UUID |
 | 54 | 16 | parent_rev | 上一個修訂的 UUID；首個修訂為全零 |
 | 70 | 32 | parent_hash | 父修訂**整個檔案 bytes** 的 SHA-256；首個修訂為全零 |
@@ -1125,6 +1250,7 @@ JSON，明文可讀（不含機密），整份以 HMAC 保護。標頭也是一�
   "parent_rev": "....",
   "type": "key_pair",
   "name": "prod-web-01-deploy",
+  "folder_id": "<uuid 或 null>",
   "tags": ["prod", "web"],
   "expires_at": null,
   "rotation_days": 90,
@@ -1169,7 +1295,7 @@ JSON，明文可讀（不含機密），整份以 HMAC 保護。標頭也是一�
   "generated_at": "...",
   "items": [
     {
-      "id": "...", "type": "key_pair", "name": "prod-web-01-deploy",
+      "id": "...", "type": "key_pair", "name": "prod-web-01-deploy", "folder_id": "<uuid 或 null>",
       "tags": ["prod"], "status": "active", "updated_at": "...",
       "current_version": 2, "expires_at": null, "head_rev": "...", "head_hash": "<base64 32 bytes>",
       "summary": { "fingerprint_sha256": "SHA256:...", "algorithm": "ed25519" }
@@ -1237,16 +1363,72 @@ JSON，明文可讀（不含機密），整份以 HMAC 保護。標頭也是一�
               "vk_check": { "nonce": "...", "ciphertext": "..." } } ],
   "active_key": "...",
   "naming": { ... },
-  "contents": { "items": 123, "hosts": 4, "log": true, "trash": false }
+  "contents": { "items": 123, "hosts": 4, "folders": 12, "log": true, "trash": false, "partial": false, "private_keys": true }
 }
 ```
 
 - `keys` 直接複製自匯出當時標頭中所有未清除的金鑰（備份內層只以 active 金鑰加密，但保留整個集合以便還原後仍能讀取未遷移的歷史），因此備份用的是**同一組金鑰、同一個主密碼與復原金鑰**；匯出時也可選擇以獨立的備份密碼另行包裝（`--backup-password`），此時每把金鑰的 `wrappings.password` 為以該密碼推導的 PK 包裝。
 - **完整性**：inner 檔案的 AAD 除了自己的 227-byte 標頭外，再串接 `SHA-256(outer_json bytes)`。竄改外層任何 byte（例如改 KDF 參數、換成別的包裝）都會使 inner 驗證失敗。
 - 還原時的順序：檔案總長度檢查 → `outer_len` 上限 → 解析外層 → KDF 參數上限 → 解開 VK → `vk_check` → inner 長度檢查 → 解密。
-- inner 明文為 JSON：`{ "header_naming", "index", "hosts", "log?", "items": [ 每個 Item 的完整 JSON（8.3）], "trash?": [...] }`。
+- inner 明文為 JSON：`{ "header_naming", "index", "hosts", "folders", "settings?", "log?", "items": [ 每個 Item 的完整 JSON（8.3）], "trash?": [...] }`。
+- **選擇性匯出**（`contents.partial = true`，4.6.2）：inner 只含被選的 Item、它們到根的資料夾路徑（`folders` 只含必要節點）、與被選金鑰綁定的 Host；不含 `index`、`log`、`settings`。`private_keys = false` 表示金鑰型 Item 已移除私鑰欄位。匯入端看到 `partial = true` 只提供「合併匯入」，不提供「還原整個 Vault」。
 - 還原流程：解析外層 → 參數上限檢查 → 以主密碼或復原金鑰解開 VK → 驗證 `vk_check` → 解密 inner → 在目標位置建立新 Vault（新的 rev 鏈，同一 VK 或由使用者選擇產生新世代）。
 - 驗收：FR-BAK-05 的「全新電腦、無快取、無 Google」情境為自動化測試。
+
+
+### 8.8 資料夾內容（`folders`，解密後 JSON）
+
+```json
+{
+  "folders": [
+    { "id": "<uuid>", "parent_id": null, "name": "工作", "color": null, "created_at": "...", "updated_at": "..." },
+    { "id": "<uuid>", "parent_id": "<uuid of 工作>", "name": "客戶甲", "color": null, "created_at": "...", "updated_at": "..." }
+  ]
+}
+```
+
+- 根目錄沒有節點；`parent_id = null` 代表位於根。
+- 合併規則（FR-FOLDER-08）：以 `id` 對齊；兩邊各自新增的節點取聯集；同一節點只有一邊改動則採用改動；兩邊都改同一節點的 `name` 或 `parent_id` 且值不同 → 衝突交由使用者；刪除與改動衝突 → 保留並標記。合併後若產生同父同名，自動在後者名稱加上「(2)」並提示。
+- 路徑解析（`工作/客戶甲`）在本機以此樹計算；同父同名視為錯誤狀態，解析時回報 `FOLDER_AMBIGUOUS_NAME`。
+
+### 8.9 設定內容（`settings`，解密後 JSON）
+
+```json
+{
+  "display_name": "Joe 的筆電",
+  "xfer": {
+    "reauth_totp": { "enabled": true, "secret_b32": "<加密內容的一部分>", "digits": 6, "period": 30, "last_used_step": 0 },
+    "default_port": 47631,
+    "auto_folder_prefix": "來自 "
+  }
+}
+```
+
+- 整個檔案以一般方式加密（8.2，kind = 7），因此 `secret_b32` 只存在密文內；解鎖後才可讀。
+- `last_used_step` 用於防止同一 TOTP 碼重複使用；各裝置同步此值，離線期間的重複使用由步數比較盡力防止。
+- `display_name` 用於區網傳送時顯示給對方，預設為裝置名稱；不是身分驗證依據。
+
+### 8.10 區網傳送協定訊息格式
+
+TCP，每則訊息為 `u32 length || u8 type || payload`，`length ≤ 1 MiB`（內容區塊）或 `≤ 4 KiB`（控制訊息）；超過即中止。握手訊息為明文，其後所有訊息以方向金鑰 AES-256-GCM 加密：`nonce = 方向識別(4 bytes) || 序號(8 bytes)`，序號從 0 遞增、不得跳號或重複，AAD = `type || 序號`。
+
+| type | 方向 | 明文 / 密文 | 內容 |
+|------|------|------|------|
+| 0x01 HELLO | A → B | 明文 | `{ version: 1, a_pub, a_name, a_vault_fp, nonce_a }` |
+| 0x02 REPLY | B → A | 明文 | `{ b_pub, b_name, b_vault_fp, nonce_b }` |
+| 0x03 CONFIRM_A | A → B | 密文 | `HMAC(k_confirm, "A-confirm" ‖ transcript)` |
+| 0x04 CONFIRM_B | B → A | 密文 | `HMAC(k_confirm, "B-confirm" ‖ transcript)` |
+| 0x05 SAS_OK | 雙向 | 密文 | 使用者按下「相符」；雙方都收到對方的 SAS_OK 後才繼續 |
+| 0x06 MANIFEST | A → B | 密文 | `{ items: [ { tmp_id, name, type, folder_path, size, has_private_key, content_hash } ], folders: [...] }` |
+| 0x07 ACCEPT | B → A | 密文 | `{ accepted_tmp_ids: [...], target_folder: "..." }`；空清單等同拒絕 |
+| 0x08 ITEM | A → B | 密文 | `{ tmp_id, item_json（8.3 格式，去掉 rev 相關欄位） }`，每筆一則；大 Item 可分塊（`seq`, `last`） |
+| 0x09 DONE | A → B | 密文 | `{ count, total_hash }` |
+| 0x0A RESULT | B → A | 密文 | `{ stored: n, merged: n, skipped: n, errors: [...] }` |
+| 0x0F ABORT | 雙向 | 密文（握手期間明文） | `{ reason_code }`；收到即關閉連線並清除金鑰 |
+
+- `content_hash` 為 A 端以 `SHA-256(item_json canonical)` 計算；B 收到 ITEM 後比對，不符即 ABORT。
+- 任何訊息型別或順序不符狀態機 → ABORT。狀態機：HELLO → REPLY → CONFIRM_A → CONFIRM_B → SAS_OK（雙向）→ MANIFEST → ACCEPT → ITEM × n → DONE → RESULT。
+- 握手逾時 30 秒；SAS 等待逾時 5 分鐘；資料傳輸每則逾時 30 秒。
 
 ---
 
@@ -1267,7 +1449,12 @@ JSON，明文可讀（不含機密），整份以 HMAC 保護。標頭也是一�
 | 主機詳細 | 位址、環境、綁定金鑰清單（帳號、用途）；動作：綁定 / 解除、產生 authorized_keys | P0 |
 | 新增 / 編輯對話框 | 依型別切換欄位；密碼產生器內嵌 | P0 |
 | 金鑰產生對話框 | 名稱、演算法、用途、註解、passphrase | P0 |
-| 匯入精靈 | 來源選擇（Chrome CSV / Chrome 設定檔 / 其他密碼管理器 / 私鑰檔 / ~/.ssh 掃描）→ 預覽與勾選 → 匯入報告 | P0（Chrome 設定檔與其他管理器為 P1） |
+| 匯入精靈 | 來源選擇（Chrome CSV / Chrome 設定檔 / 其他密碼管理器 / 選擇性匯出檔 / 私鑰檔 / ~/.ssh 掃描）→ 目標資料夾 → 預覽與勾選 → 匯入報告 | P0（Chrome 設定檔與其他管理器為 P1） |
+| 資料夾樹 | 主視窗左側：階層資料夾、各資料夾 Item 數、未分類、垃圾桶；右鍵新增 / 改名 / 移動 / 刪除；拖放 Item 到資料夾（P1） | P0 |
+| 匯出 | 完整備份或選擇性匯出；資料夾樹加核取方塊、含子資料夾選項、是否含私鑰、加密或明文、備份密碼 | P0 |
+| 傳送（區網） | 輸入對方 IP、埠、接收代碼 → SAS 比對 → 再驗證（主密碼或 TOTP）→ 勾選內容 → 等待對方接受 → 進度與結果 | P1 |
+| 接收（區網） | 顯示本機 IP 清單、埠、接收代碼與倒數 → SAS 比對 → 清單預覽與勾選、目標資料夾 → 進度與結果 | P1 |
+| 設定 → 傳送 | 顯示名稱、預設埠、啟用傳送再驗證 TOTP（QR 碼登錄、驗證一次後生效、停用） | P1 |
 | 同步與狀態 | pending、衝突列表（逐欄位並排比較、選擇保留或逐欄挑選）、疑似回滾警示、隔離區（外洩輪替期間的未信任舊世代寫入：檢視、重新提交、丟棄）、標頭分支合併、到期與逾期輪替提醒、missing 項目、伺服器端待處理清單（removal_pending 綁定） | P0 |
 | 設定 | 自動鎖定時間、剪貼簿清除秒數、Drive 資料夾資訊、Google 授權狀態與撤銷、變更主密碼、重新產生復原金鑰、語言、索引摘要雜湊與最後修訂時間（供跨裝置人工比對） | P0 |
 | 設定 → 全面輪替 | 說明與主密碼變更的差異、外洩原因選擇與憑證替換、服務端輪替清單、啟動、狀態機目前狀態與進度（已遷移 / 總數）、續行、取消、裝置確認清單與移除裝置 | P0 |
@@ -1326,9 +1513,9 @@ hsm verify
 hsm gc                             # 第一版只清理本機快取與垃圾桶 Item 的內容，不刪除 Drive 修訂
 
 # 帳密與通用項目
-hsm list [--type TYPE] [--tag TAG] [--status S]
+hsm list [--type TYPE] [--tag TAG] [--status S] [--folder PATH [--recurse]]
 hsm search <query>
-hsm add <name> --type credential [--username U] [--generate [--length N] | --stdin | --password-file PATH] [--url URL] [--tag T ...]
+hsm add <name> --type credential [--username U] [--generate [--length N] | --stdin | --password-file PATH] [--url URL] [--tag T ...] [--folder PATH]
                                    # 未給密碼來源時以隱藏輸入提示；沒有 --password VALUE 這種參數
 hsm add <name> --type generic [--from-file PATH | --fields-json PATH | --field KEY ...]
                                    # --field KEY 只給欄位名稱，值以隱藏輸入提示
@@ -1379,6 +1566,22 @@ hsm host authorized-keys <host> [--out PATH]   # 只含 active 版本，retired/
 
 # 備份與匯入匯出
 hsm export --encrypted --out PATH [--backup-password] [--include-log] [--include-trash]
+hsm export --encrypted --out PATH --select <name>... | --folder PATH [--no-recurse] [--no-private-keys] [--backup-password]   # 選擇性匯出
+hsm import --from PATH --merge [--into FOLDER] [--on-duplicate version|skip|new] [--dry-run]   # 合併匯入選擇性匯出檔
+
+# 資料夾
+hsm folder list [--tree]
+hsm folder create <path> [--create-parents]
+hsm folder rename <path> <new-name>
+hsm folder move <path> --to <parent-path>
+hsm folder rm <path> [--move-contents-to <parent-path> | --trash-contents]
+hsm mv <name>... --folder <path>   # 移動 Item
+
+# 區網傳送（P1）
+hsm xfer receive [--port N] [--into FOLDER]           # 進入接收模式，顯示 IP、埠、接收代碼、SAS
+hsm xfer send --to IP[:PORT] --code CODE (--select <name>... | --folder PATH) [--with-private-keys]
+                                                       # 顯示 SAS，提示再驗證（主密碼或 TOTP），等待對方接受
+hsm xfer totp enroll | disable | test
 hsm export --plain --out PATH      # 二次確認
 hsm restore --from PATH [--to-drive-folder PATH | --to-local DIR]   # 可在全新電腦、無 Google 授權下執行
 hsm import --from PATH [--format hsm|chrome-csv|bitwarden|1password|keepass|firefox-csv|edge-csv] [--on-duplicate version|skip|new] [--dry-run]
@@ -1394,7 +1597,7 @@ hsm log [--since T] [--action A] [--item NAME] [--limit N]
 - **沒有任何參數接受命令列明文機密**（密碼、passphrase、TOTP 秘密、欄位值）。機密只能來自隱藏輸入提示、`--stdin`、`--password-file PATH`（檔案須為僅本人可讀，否則拒絕）或 `--generate`。這避免機密進入 shell history、程序參數列表與行程監控工具。
 - 所有需要主密碼的指令在非 TTY 且無 agent、無 `HSM_PASSWORD_FILE` 時，以結束碼 3 失敗。
 - 任何會寫入含明文機密檔案的指令，都以 5.3 的「建立時即為僅本人可讀」方式建立檔案。
-- 結束碼：0 成功、1 一般錯誤、2 參數錯誤、3 未解鎖或主密碼錯誤、4 Google 授權失效、5 網路或 Drive 錯誤、6 存在衝突需處理。
+- 結束碼：0 成功、1 一般錯誤、2 參數錯誤、3 未解鎖或主密碼錯誤、4 Google 授權失效、5 網路或 Drive 錯誤、6 存在衝突需處理、7 區網傳送失敗。
 
 ---
 
@@ -1407,7 +1610,7 @@ hsm log [--since T] [--action A] [--item NAME] [--limit N]
 | 可靠性 | 任何時刻程序被中斷（Ctrl-C、斷電、斷線）都不得造成已確認寫入的資料遺失；寫入快取採「寫暫存檔再 rename」；Drive 上的資料從不就地覆寫；全面輪替在任一步中斷後重啟皆可續行或明確回復。 |
 | 相容性 | Linux x86_64 / arm64、macOS（Intel / Apple Silicon）、Windows 10+。桌面應用程式以各平台原生安裝檔發布（`.dmg`、`.msi`、`.AppImage` / `.deb`）。 |
 | 互通性 | 匯出的 OpenSSH 金鑰需能被 `ssh-keygen -y`、`ssh-add` 正確讀取；PEM 需能被 `openssl` 讀取。 |
-| 測試 | 加密層與檔案格式單元測試覆蓋率 ≥ 90%；金鑰匯入匯出與 OpenSSH / OpenSSL 做互通測試；下列**復原導向驗收測試**為 Phase 1a 的結束條件，比覆蓋率更優先：(a) 變更主密碼與全面輪替的每一個步驟之後強制中斷，重啟後 Vault 必須仍可用主密碼與復原金鑰開啟且資料完整；(b) 兩台模擬裝置離線各自修改同一 Item、同一 hosts、同時改密碼，上線後必須偵測分支且雙方資料皆保留；(c) 清空本機環境、不給 Google 授權，只用備份檔加主密碼或復原金鑰還原，所有 Item 與金鑰可讀；(d) 竄改檔案長度欄位、KDF 參數、parent_rev、標頭 MAC 保護的欄位與回滾整份資料，工具必須拒絕並給出對應錯誤碼；(e) 寫入私鑰與明文匯出時在 Windows 與 Unix 驗證檔案建立瞬間即為僅本人可讀；(f) 偽造中間修訂（合法 appProperties、偽造或替換的內容）使新 head 看似信任點的後代，必須被 HASH_MISMATCH 或 MISSING_PARENT 擋下；(g) 舊世代裝置在輪替進入 `settled` 之後才上傳延遲的修訂，資料必須被遷移且不遺失；(h) 取消輪替途中斷電，重啟後兩把金鑰皆可用且能續行或完成反向遷移；(i) 離線裝置在輪替完成並清除舊世代後重新連線，其 pending 修訂必須能以本機舊標頭快取與舊憑證解出並重新上傳；(j) 假子修訂隱藏撤銷分支：T 分出 active 與 revoked 兩個合法修訂，加入一個宣稱以 revoked 為父的無效檔案，同步後必須仍回報分支衝突；(k) 舊 VK 簽署降級標頭：以已清除或 retired 世代的 VK 製作 parent 指向目前信任標頭、top 較低的 stable 標頭，必須被 HEADER_TRANSITION_DENIED 或 HEADER_MAC_INVALID 擋下；(l) 完成輪替、清除舊世代、再改一次主密碼後，全新電腦只用最新主密碼同步，必須能驗證完整歷史並採用最新資料；(m) 前進輪替進入 settled 後，某台裝置尚未寫入此 op 的 forward 確認（即使它曾看過新世代，或對先前被取消的 op 寫過確認），必須無法進入 stable(m; ∅) 清除舊世代；(n) 取消後再次輪替，目標世代必須為歷來最大世代加一，且所有歷史修訂的世代號仍能唯一對應金鑰；(o) 一般非合併檔案與備份檔寫入後立即解密成功（含空 trailer 雜湊）；(p) 取消輪替完成後鎖定、重啟，並以全新裝置用目前主密碼解鎖與同步，標頭 MAC 與狀態皆驗證通過；(q) 離線裝置跨過另一台完成的完整輪替（stable → migrating → settled → stable）後重新同步，路徑驗證通過且資料可用；(r) 兩台裝置以相同 parent 各自寫入後，必須進入衝突處理而不是回滾警告；(s) 保留本機快取、在 Drive 刪除某個修訂或整個檔案，同步必須回報 REMOTE_DELETED 或 ROLLBACK_SUSPECTED 並能從本機快取重新上傳；(t) 外洩輪替進入 settled 後，以已外洩的舊 VK 製作通過 AES-GCM 驗證的修訂，分別把 parent 指向新世代 head（必須 GENERATION_REGRESSION）與指向舊世代修訂（必須隔離、不遷移、不出現在衝突處理），且隔離內容只能由使用者明確重新提交；(u) 兩台裝置同時啟動輪替並各自以不同金鑰寫入後，合併標頭必須保留兩把金鑰，兩邊資料都能解開，遷移與衝突處理完成後所有資料都在 active 金鑰下；(v) 連續取消兩次、改一次密碼、重新產生復原金鑰後，全新裝置以目前主密碼與以復原金鑰各自解鎖，必須解出整個金鑰集合並能同步與讀取所有歷史。同步引擎以本機資料夾儲存層做整合測試。 |
+| 測試 | 加密層與檔案格式單元測試覆蓋率 ≥ 90%；金鑰匯入匯出與 OpenSSH / OpenSSL 做互通測試；下列**復原導向驗收測試**為 Phase 1a 的結束條件，比覆蓋率更優先：(a) 變更主密碼與全面輪替的每一個步驟之後強制中斷，重啟後 Vault 必須仍可用主密碼與復原金鑰開啟且資料完整；(b) 兩台模擬裝置離線各自修改同一 Item、同一 hosts、同時改密碼，上線後必須偵測分支且雙方資料皆保留；(c) 清空本機環境、不給 Google 授權，只用備份檔加主密碼或復原金鑰還原，所有 Item 與金鑰可讀；(d) 竄改檔案長度欄位、KDF 參數、parent_rev、標頭 MAC 保護的欄位與回滾整份資料，工具必須拒絕並給出對應錯誤碼；(e) 寫入私鑰與明文匯出時在 Windows 與 Unix 驗證檔案建立瞬間即為僅本人可讀；(f) 偽造中間修訂（合法 appProperties、偽造或替換的內容）使新 head 看似信任點的後代，必須被 HASH_MISMATCH 或 MISSING_PARENT 擋下；(g) 舊世代裝置在輪替進入 `settled` 之後才上傳延遲的修訂，資料必須被遷移且不遺失；(h) 取消輪替途中斷電，重啟後兩把金鑰皆可用且能續行或完成反向遷移；(i) 離線裝置在輪替完成並清除舊世代後重新連線，其 pending 修訂必須能以本機舊標頭快取與舊憑證解出並重新上傳；(j) 假子修訂隱藏撤銷分支：T 分出 active 與 revoked 兩個合法修訂，加入一個宣稱以 revoked 為父的無效檔案，同步後必須仍回報分支衝突；(k) 舊 VK 簽署降級標頭：以已清除或 retired 世代的 VK 製作 parent 指向目前信任標頭、top 較低的 stable 標頭，必須被 HEADER_TRANSITION_DENIED 或 HEADER_MAC_INVALID 擋下；(l) 完成輪替、清除舊世代、再改一次主密碼後，全新電腦只用最新主密碼同步，必須能驗證完整歷史並採用最新資料；(m) 前進輪替進入 settled 後，某台裝置尚未寫入此 op 的 forward 確認（即使它曾看過新世代，或對先前被取消的 op 寫過確認），必須無法進入 stable(m; ∅) 清除舊世代；(n) 取消後再次輪替，目標世代必須為歷來最大世代加一，且所有歷史修訂的世代號仍能唯一對應金鑰；(o) 一般非合併檔案與備份檔寫入後立即解密成功（含空 trailer 雜湊）；(p) 取消輪替完成後鎖定、重啟，並以全新裝置用目前主密碼解鎖與同步，標頭 MAC 與狀態皆驗證通過；(q) 離線裝置跨過另一台完成的完整輪替（stable → migrating → settled → stable）後重新同步，路徑驗證通過且資料可用；(r) 兩台裝置以相同 parent 各自寫入後，必須進入衝突處理而不是回滾警告；(s) 保留本機快取、在 Drive 刪除某個修訂或整個檔案，同步必須回報 REMOTE_DELETED 或 ROLLBACK_SUSPECTED 並能從本機快取重新上傳；(t) 外洩輪替進入 settled 後，以已外洩的舊 VK 製作通過 AES-GCM 驗證的修訂，分別把 parent 指向新世代 head（必須 GENERATION_REGRESSION）與指向舊世代修訂（必須隔離、不遷移、不出現在衝突處理），且隔離內容只能由使用者明確重新提交；(u) 兩台裝置同時啟動輪替並各自以不同金鑰寫入後，合併標頭必須保留兩把金鑰，兩邊資料都能解開，遷移與衝突處理完成後所有資料都在 active 金鑰下；(v) 連續取消兩次、改一次密碼、重新產生復原金鑰後，全新裝置以目前主密碼與以復原金鑰各自解鎖，必須解出整個金鑰集合並能同步與讀取所有歷史；(w) 兩台裝置離線各自建立與改名資料夾、移動 Item，上線後樹合併正確、同名衝突有提示、沒有 Item 遺失或落到不存在的資料夾；(x) 勾選資料夾做選擇性匯出，在另一個 Vault 合併匯入到指定資料夾，路徑結構一致、重複規則正確、匯出檔不能被當作完整備份還原；(y) 區網傳送：中間人同時與 A、B 建通道時 SAS 不符必須中止；錯誤的接收代碼必須在確認步驟失敗；再驗證失敗 5 次中止；B 未接受前 A 不送任何 ITEM；B 收到的內容雜湊不符時中止且不寫入；傳送完成後兩端磁碟上不存在明文；B 的資料夾結構與 A 勾選的結構一致。 |
 | 相依性 | 不依賴專案方任何線上服務；除 Google Drive API 外不連線其他主機（含不做自動更新檢查，除非使用者明確啟用）。 |
 | 可觀測性 | `--verbose` 輸出 Drive API 呼叫摘要（方法、檔案 ID、狀態碼），永不輸出內容或 token。 |
 | 國際化 | CLI 訊息繁體中文與英文雙語，預設依系統語系，`HSM_LANG` 可覆寫。 |
@@ -1429,6 +1632,7 @@ hsm log [--since T] [--action A] [--item NAME] [--limit N]
 | 前端 | TypeScript + Svelte 或 React | 由團隊熟悉度決定。 |
 | CLI 框架 | `spf13/cobra` | 慣例成熟，自動產生說明與補全。 |
 | 剪貼簿 | Wails 內建 API（GUI）、`atotto/clipboard`（CLI） | 跨平台。 |
+| 區網傳送 | `golang.org/x/crypto/curve25519`、`hkdf`、標準庫 `crypto/aes` + `cipher.NewGCM`；TOTP 以 `pquerna/otp` 或等效 | 不自行實作密碼學 |
 | Chrome 匯入 | `modernc.org/sqlite`（純 Go，讀 `Login Data`）、`golang.org/x/crypto/pbkdf2`（macOS / Linux 金鑰推導）、DPAPI 透過 `golang.org/x/sys/windows` | 不需 cgo。 |
 
 替代方案：Rust + Tauri 在記憶體安全與 zeroize 上更嚴謹、安裝檔更小，但 Google API 與 ssh-agent 生態較薄；若團隊熟悉 Rust 可考慮。Electron 不建議，安裝檔過大且記憶體佔用高。
@@ -1442,12 +1646,12 @@ hsm log [--since T] [--action A] [--item NAME] [--limit N]
 | 階段 | 目標 | 主要交付 | 對應需求 |
 |------|------|----------|----------|
 | **Phase 0：確認** | 規格審閱、技術選型定案、建立 Google Cloud OAuth client、repo 骨架 | 本文件 1.0、CI 流程、專案結構、儲存層介面定義 | 第 13 章全部 |
-| **Phase 1a：核心與復原** | Core 程式庫在本機資料夾儲存層與 Google Drive 上通過全部復原導向驗收測試 | 三層金鑰結構、標頭 MAC 與雜湊鏈、8.2 檔案格式與硬性上限、不可覆寫修訂與經驗證的分支偵測、回滾防護、衝突合併修訂、變更主密碼、復原金鑰、全面輪替狀態機（含取消、延遲上傳、舊裝置重新加入）、可獨立解鎖的備份與還原、Google 授權與資料夾建立、命名規則、帳密 / 通用 / 金鑰 / 憑證 / hosts 的資料模型與讀寫、金鑰產生 / 匯入 / 匯出（含每版本狀態與部署狀態）、Chrome CSV 匯入引擎、操作紀錄、Windows ACL 與 Unix 權限、驗收測試 (a)–(v) | 5.1、5.3、8、4.5、4.6 的 P0 |
+| **Phase 1a：核心與復原** | Core 程式庫在本機資料夾儲存層與 Google Drive 上通過全部復原導向驗收測試 | 三層金鑰結構、標頭 MAC 與雜湊鏈、8.2 檔案格式與硬性上限、不可覆寫修訂與經驗證的分支偵測、回滾防護、衝突合併修訂、變更主密碼、復原金鑰、全面輪替狀態機（含取消、延遲上傳、舊裝置重新加入）、可獨立解鎖的備份與還原、Google 授權與資料夾建立、命名規則、帳密 / 通用 / 金鑰 / 憑證 / hosts / folders / settings 的資料模型與讀寫、資料夾樹與合併、選擇性匯出與合併匯入、金鑰產生 / 匯入 / 匯出（含每版本狀態與部署狀態）、Chrome CSV 匯入引擎、操作紀錄、Windows ACL 與 Unix 權限、驗收測試 (a)–(x) | 5.1、5.3、8、4.5、4.6 的 P0 |
 | **Phase 1b：桌面介面** | 桌面應用程式在單一裝置可完整使用，第二裝置可連接同步 | 9.1.1 所有 P0 畫面、5.6 GUI 強化、自動鎖定、剪貼簿清除、拖放匯入、衝突並排處理、伺服器端待處理清單 | 其餘 P0 |
-| **Phase 2：日常順手** | CLI、自動安裝、提醒、歷史清理設計 | CLI 與 agent（5.6）、`key install`、ssh-add、經驗證檢查點與歷史清理（FR-SYNC-19）、Chrome 設定檔直接讀取、其他密碼管理器匯入、TOTP、到期與輪替提醒、指紋反查、verify、垃圾桶、Drive 狀態、系統匣、操作紀錄畫面 | 所有 P1 |
+| **Phase 2：日常順手** | CLI、自動安裝、提醒、歷史清理設計、區網傳送 | 區網點對點傳送（4.9、5.7、8.10）與傳送再驗證 TOTP、CLI 與 agent（5.6）、`key install`、ssh-add、經驗證檢查點與歷史清理（FR-SYNC-19）、Chrome 設定檔直接讀取、其他密碼管理器匯入、TOTP、到期與輪替提醒、指紋反查、verify、垃圾桶、Drive 狀態、系統匣、操作紀錄畫面 | 所有 P1 |
 | **Phase 3：擴充** | 進階整合 | 多 Vault、背景同步、Host 掃描與公鑰推送、附件型 Item、PuTTY 匯出、其他 Chromium 瀏覽器匯入、全域快捷鍵、其他儲存後端、檔案大小填充 | P2 |
 
-每階段結束條件：對應需求的自動化測試全部通過、第 5 章安全檢查逐項確認、使用文件更新。Phase 1a 另外要求驗收測試 (a)–(v) 全數通過後才開始 Phase 1b。
+每階段結束條件：對應需求的自動化測試全部通過、第 5 章安全檢查逐項確認、使用文件更新。Phase 1a 另外要求驗收測試 (a)–(x) 全數通過後才開始 Phase 1b；(y) 為 Phase 2 區網傳送的結束條件。
 
 ---
 
@@ -1475,6 +1679,10 @@ hsm log [--since T] [--action A] [--item NAME] [--limit N]
 | Q-18 | 備份檔是否預設包含操作紀錄 | 預設不含（紀錄含 Item 名稱與時間，但不含機密值；由使用者決定） | FR-BAK-07 |
 | Q-19 | 全面輪替是否也要重新產生復原金鑰 | 預設詢問；懷疑復原金鑰外洩時必須 | 5.1.6 |
 | Q-20 | 取消輪替後被取消的世代以 retired 保留到下次前進輪替，是否需要「單獨清除」操作 | 第一版不提供；需要時再做一次前進輪替即可 | 5.1.6 |
+| Q-22 | 區網傳送預設連接埠 | 47631（未註冊、避開常見服務）；可在設定更改 | 4.9 |
+| Q-23 | SAS 長度：6 位數（百萬分之一）或 4 個單字（更易唸、約 10^12） | 6 位數，介面以 3-3 分組顯示 | 5.7.1 |
+| Q-24 | 傳送金鑰型 Item 時預設是否含私鑰 | 預設不含，需明確勾選並警告 | FR-XFER-04 |
+| Q-25 | 傳送再驗證是否允許只用 TOTP 而不設主密碼選項 | 兩者皆可，由 A 當下選擇；TOTP 需先啟用 | FR-XFER-03 |
 | Q-21 | routine 輪替是否也應改為隔離（與外洩輪替相同），犧牲延遲遷移的便利換取一致性 | **已決議（2026-10-28）：維持區分。** routine 輪替允許延遲遷移，結果以分支呈現、使用者可見；外洩輪替一律隔離。理由與規則已寫入 FR-SYNC-21 與 5.1.6 | FR-SYNC-21 |
 
 ---
@@ -1523,6 +1731,15 @@ hsm log [--since T] [--action A] [--item NAME] [--limit N]
 | 1 | `GENERATION_REGRESSION` | 子修訂的金鑰世代低於父修訂，已隔離 |
 | 1 | `UNSNAPSHOTTED_MIGRATION` | 跨世代遷移修訂的父不在輪替快照或允許遷移清單中，已隔離 |
 | 6 | `QUARANTINED_WRITES` | 外洩輪替期間出現未信任的舊世代修訂，待使用者處理 |
+| 1 | `FOLDER_NOT_FOUND` | 資料夾路徑不存在（未加 `--create-parents`） |
+| 1 | `FOLDER_AMBIGUOUS_NAME` | 同父資料夾下有同名節點（合併後的錯誤狀態） |
+| 1 | `PARTIAL_BACKUP_NOT_RESTORABLE` | 選擇性匯出檔不能用於還原整個 Vault，請改用合併匯入 |
+| 7 | `XFER_SAS_MISMATCH` | 使用者按下「不符」或對方中止 |
+| 7 | `XFER_CODE_INVALID` | 接收代碼錯誤或已失效（確認步驟失敗） |
+| 7 | `XFER_REAUTH_FAILED` | 傳送前再驗證失敗達上限 |
+| 7 | `XFER_REJECTED` | 接收方拒絕或接受清單為空 |
+| 7 | `XFER_INTEGRITY` | 收到的內容與清單雜湊不符，已中止並丟棄 |
+| 7 | `XFER_TIMEOUT` | 握手、SAS 或傳輸逾時 |
 | 1 | `PERMISSION_UNSAFE` | 目標檔案或目錄無法以僅本人可讀方式建立 |
 | 1 | `UNSAFE_PATH` | 目標目錄權限不安全 |
 | 1 | `IMPORT_PARSE` | 匯入檔案格式無法解析 |
