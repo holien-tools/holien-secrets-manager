@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |------|------|
-| 文件版本 | 0.11.0（草稿） |
+| 文件版本 | 0.12.0（草稿） |
 | 狀態 | 待審閱 |
 | 最後更新 | 2026-10-28 |
 | 適用範圍 | 全專案（單機桌面應用程式、CLI、Google Drive 儲存層） |
@@ -16,6 +16,8 @@
 > 0.4.0 版變更：Drive 上的**資料夾名稱與所有檔案名稱皆由使用者自訂**，系統只提供預設值；檔案辨識改以 Drive 檔案屬性為準，不依賴檔名。
 >
 > 0.5.0 版變更：新增 5.1.1 至 5.1.6，逐步說明存放檔案的**加密與解密流程**、金鑰推導、主密碼變更與復原。
+>
+> 0.12.0 版變更（決議 Q-01 至 Q-03）：實作語言定為 Go；OAuth client 由使用者自行在 Google Cloud Console 建立；執行檔與所有識別字由 `holisec` 改名為 `holisec`（設定目錄、環境變數、Drive appProperties 前綴、預設副檔名 `.holisec`、檔案 magic `HLS1` / `HLSB`、金鑰推導 domain 字串）。本文件簡稱亦改為 Holisec。
 >
 > 0.11.0 版變更（新增功能）：**資料夾**（使用者自訂的階層資料夾，Item 可歸類與移動）；**選擇性匯出**（勾選 Item 或資料夾匯出，匯入時合併並保留資料夾結構）；**區網點對點傳送**（輸入對方區網 IP，雙方比對短驗證碼建立加密通道，傳送方再驗證主密碼或 TOTP 後才送出，接收方預覽後依原資料夾結構存入）。新增 4.9、5.7、8.8 至 8.10 與對應的畫面、指令、測試、待決議。
 >
@@ -55,7 +57,7 @@
 
 ### 1.1 目標
 
-Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見第 2 章）是一套**個人使用的單機桌面應用程式**，在使用者自己的電腦上執行，沒有伺服器端，將資料加密後存放在使用者自己的 Google Drive，管理下列兩大類機密：
+Holien Secrets Manager（以下簡稱 Holisec，見第 2 章）是一套**個人使用的單機桌面應用程式**，在使用者自己的電腦上執行，沒有伺服器端，將資料加密後存放在使用者自己的 Google Drive，管理下列兩大類機密：
 
 1. **帳號密碼（Credential）**：網站與服務的登入帳密、API Token、資料庫連線字串等。
 2. **伺服器金鑰（Key Pair）**：個人管理的伺服器所使用的非對稱金鑰對，包含 SSH 金鑰與 TLS 憑證私鑰，涵蓋產生、匯入、儲存、取用、輪替、撤銷與綁定主機的完整生命週期。
@@ -102,7 +104,7 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
 
 | 名詞 | 定義 |
 |------|------|
-| HSM | 本專案 Holien Secrets Manager 之簡稱。**不是**硬體安全模組。 |
+| Holisec | 本專案 Holien Secrets Manager 之簡稱，也是執行檔名稱。早期草稿曾用 HSM，因與硬體安全模組混淆而改名（Q-03 已決議）。 |
 | Item（項目） | 系統中任何被加密保存的資料單位，有型別（type）：帳密、通用、金鑰對、TLS 憑證。 |
 | Credential（帳密） | Item 的一種型別，由帳號、密碼、網址、備註等欄位組成。 |
 | Key Pair（金鑰對） | Item 的一種型別，包含私鑰、公鑰、演算法、指紋等欄位。 |
@@ -130,7 +132,7 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
 | Lock / Unlock | 本機尚未載入 VK 的狀態為 locked；輸入主密碼解開 VK 後為 unlocked。 |
 | Drive Folder（Drive 資料夾） | Google Drive 上存放此 Vault 所有檔案的資料夾。名稱由使用者自訂，預設 `HolienSecretsManager`。 |
 | Naming Scheme（命名規則） | 此 Vault 在 Drive 上各類檔案的名稱設定，存於 Vault 標頭，所有裝置共用。 |
-| Device（裝置） | 執行 HSM 的一台電腦。每台裝置有獨立的 device_id，用於同步與衝突判斷。 |
+| Device（裝置） | 執行 Holisec 的一台電腦。每台裝置有獨立的 device_id，用於同步與衝突判斷。 |
 | Chrome 設定檔（Profile） | Chrome 存放單一使用者資料的目錄，內含 `Login Data` SQLite 資料庫，儲存網址、帳號與以作業系統金鑰加密的密碼。 |
 
 ---
@@ -142,7 +144,7 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
 | UC-01 | 使用者第一次在筆電上啟動應用程式，輸入主密碼、完成 Google 授權，接受預設的資料夾與檔案名稱（或改成自己想要的名稱），工具在 Drive 建立資料夾與空的 Vault。 |
 | UC-01a | 使用者希望 Drive 上看起來不像密碼庫，將資料夾命名為 `Photos/2019`、標頭檔命名為 `notes.txt`、項目檔副檔名改為 `.jpg`；工具照常運作，因為辨識靠檔案屬性而非檔名。 |
 | UC-02 | 使用者為新伺服器產生一把 ed25519 SSH 金鑰，取得公鑰貼到伺服器 `authorized_keys`，並記錄此金鑰綁定於該主機的 `deploy` 帳號。 |
-| UC-03 | 使用者換到桌機，執行 `hsm init --existing`，完成 Google 授權並輸入主密碼，Vault 自動從 Drive 同步下來。 |
+| UC-03 | 使用者換到桌機，執行 `holisec init --existing`，完成 Google 授權並輸入主密碼，Vault 自動從 Drive 同步下來。 |
 | UC-04 | 使用者在桌機上將某把私鑰安裝到 `~/.ssh/`，或直接載入 ssh-agent，不經過磁碟。 |
 | UC-05 | 使用者將舊的 RSA 金鑰輪替為新金鑰，新舊版本並存，更新完所有主機後將舊版撤銷。 |
 | UC-06 | 使用者在沒有網路的環境查詢某個網站的密碼，工具使用本機快取回應。 |
@@ -183,13 +185,14 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
 | 編號 | 優先 | 需求 |
 |------|:--:|------|
 | FR-DRIVE-01 | P0 | 以 OAuth 2.0（桌面應用程式流程、PKCE）取得 Google Drive 授權；權限範圍最小化，預設使用 `drive.file`（只能存取本工具建立的檔案）。詳見 7.1。 |
+| FR-DRIVE-18 | P0 | OAuth client 由使用者自行建立並在初始化時提供 client ID 與 client secret（Q-02 已決議）；兩者存於本機設定目錄，連接既有 Vault 的新裝置需再次提供（可用同一組）。工具不內建 client，並在初始化精靈內嵌建立步驟說明與 Google Cloud Console 連結。 |
 | FR-DRIVE-02 | P0 | 資料夾路徑由使用者自訂，預設為 My Drive 根目錄下的 `HolienSecretsManager`。初始化時以預設值預先填入，使用者可直接接受或修改。 |
 | FR-DRIVE-03 | P0 | 資料夾路徑以 `/` 分隔，例如 `Backups/Secrets`；逐層檢查，不存在的層級自動建立。 |
 | FR-DRIVE-04 | P0 | 指定路徑若已存在由本工具建立、包含有效 Vault 標頭的資料夾，則連接該 Vault；若資料夾存在但不含 Vault 標頭，詢問是否在其中建立新 Vault。 |
 | FR-DRIVE-05 | P0 | 所有上傳到 Drive 的檔案在上傳前於本機加密（格式見第 8 章）；Item 檔名中代表該項目的部分為隨機識別碼，不含 Item 名稱或型別。 |
 | FR-DRIVE-12 | P0 | Drive 上每一類檔案的名稱皆由使用者自訂，系統提供預設值（見 7.3）。可自訂的項目：Vault 標頭檔名、索引檔名、操作紀錄檔名、主機檔名、Item 子資料夾名稱、Item 檔名樣式（含 `{id}` 佔位符與副檔名）。 |
 | FR-DRIVE-13 | P0 | 命名規則存於 Vault 標頭，其他裝置連接 Vault 時自動採用，不需重新輸入。 |
-| FR-DRIVE-14 | P0 | 檔案辨識以 Drive 檔案的 `appProperties`（`hsm.kind`、`hsm.vault_id`、`hsm.file_id`）為準，檔名只是顯示用途。使用者在 Drive 網頁手動改名不會破壞 Vault；工具偵測到檔名與命名規則不符時只在狀態畫面提示，不自動改回。 |
+| FR-DRIVE-14 | P0 | 檔案辨識以 Drive 檔案的 `appProperties`（`holisec.kind`、`holisec.vault_id`、`holisec.file_id`）為準，檔名只是顯示用途。使用者在 Drive 網頁手動改名不會破壞 Vault；工具偵測到檔名與命名規則不符時只在狀態畫面提示，不自動改回。 |
 | FR-DRIVE-15 | P0 | 檔名驗證：不得為空、不得含 `/`、長度不超過 200 字元、同一 Vault 內各類檔名不得相同、Item 檔名樣式必須含 `{id}`。不限制副檔名，允許使用者刻意用 `.txt`、`.jpg` 等名稱。 |
 | FR-DRIVE-16 | P1 | 事後修改命名規則：於設定畫面修改後，工具更新 Vault 標頭並逐一以 `files.update` 重新命名 Drive 上的檔案；中途失敗可重試，重試時以 `appProperties` 找到檔案，不受已改名或未改名影響。 |
 | FR-DRIVE-17 | P1 | 事後搬移資料夾：可指定新的資料夾路徑，工具以 `files.update` 變更資料夾的 parent，不重新上傳內容。 |
@@ -467,16 +470,16 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
 1. PK = Argon2id(password=NFKC(master_password), salt, memory, iterations, parallel, out_len=32)
 2. 對標頭 keys[] 中**每一把未清除的金鑰** k：
      VK_k = AES-256-GCM-Decrypt(key=PK, nonce=k.wrappings.password.nonce,
-                               aad="hsm-vk-wrap-v1" || vault_id || k.key_id || k.gen,
+                               aad="holisec-vk-wrap-v1" || vault_id || k.key_id || k.gen,
                                ct=k.wrappings.password.wrapped_vk)
      任一失敗 → BAD_PASSWORD；PK 與已解出的 VK 全部 zeroize
      （所有未清除金鑰都以同一個主密碼、各自的 nonce 包裝；改密碼時一併重新包裝，見 5.1.5）
 3. 對每一把 k 驗證：AES-256-GCM-Decrypt(key=VK_k, nonce=k.vk_check.nonce, aad=vault_id || k.key_id || k.gen,
-                                      ct=k.vk_check.ciphertext) == "hsm-vk-check-v1"
+                                      ct=k.vk_check.ciphertext) == "holisec-vk-check-v1"
      失敗 → CORRUPTED（標頭損毀或被竄改）
    得到金鑰集合 {key_id → VK}；top 與 active 由狀態機決定（5.1.6）
 4. 標頭 MAC（FR-INIT-12）：header.mac.key_id 必須等於此標頭的 top（最高世代的未清除金鑰；同世代多把時取 key_id 位元組序最大者），否則 HEADER_MAC_INVALID
-     HK = HKDF-SHA256(ikm=VK_top, salt=vault_id, info="hsm-header-mac-v1", len=32)
+     HK = HKDF-SHA256(ikm=VK_top, salt=vault_id, info="holisec-header-mac-v1", len=32)
      HMAC-SHA256(HK, canonical(header 去掉 mac 欄位)) == header.mac.value，否則 HEADER_MAC_INVALID
      通過後才可採用 rev / parent_rev / parent_hash / keys[].status / rekey_ops / naming / devices
 5. 標頭信任點與轉換授權：sync_state 有標頭信任點 P 時，此標頭 H 必須能沿雜湊鏈驗證回到 P，
@@ -485,9 +488,9 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
 
 以復原金鑰解鎖：
 1. RK = Base32Decode(使用者輸入，忽略空白與大小寫)，長度須為 32 bytes
-2. RK_key = HKDF-SHA256(ikm=RK, salt=wrappings.recovery.hkdf_salt, info="hsm-recovery-v1", len=32)
+2. RK_key = HKDF-SHA256(ikm=RK, salt=wrappings.recovery.hkdf_salt, info="holisec-recovery-v1", len=32)
 3. 對每一把未清除金鑰 k：VK_k = AES-256-GCM-Decrypt(key=RK_key, nonce=k.wrappings.recovery.nonce,
-                            aad="hsm-vk-wrap-v1" || vault_id || k.key_id || k.gen,
+                            aad="holisec-vk-wrap-v1" || vault_id || k.key_id || k.gen,
                             ct=k.wrappings.recovery.wrapped_vk)
 4. 驗證與後續同上；RK、RK_key zeroize
 ```
@@ -511,10 +514,10 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
 4. 產生 DEK：DEK = CSPRNG(32 bytes)
 5. 包裝 DEK：dek_nonce = CSPRNG(12)
              wrapped_dek = AES-256-GCM-Encrypt(key=VK_a, nonce=dek_nonce,
-                             aad="hsm-dek-wrap-v1" || vault_id || file_id || rev || key_id_a, pt=DEK)
+                             aad="holisec-dek-wrap-v1" || vault_id || file_id || rev || key_id_a, pt=DEK)
 6. 組 227-byte 標頭（8.2）：
              trailer = 合併父列表（每筆 rev 16 bytes + hash 32 bytes），一般寫入為空
-             header = "HSM1" || format(1) || kind || vault_id || file_id || rev || parent_rev ||
+             header = "HLS1" || format(1) || kind || vault_id || file_id || rev || parent_rev ||
                       parent_hash || key_id_a || dek_nonce || wrapped_dek || nonce || plaintext_len ||
                       merge_count || trailer_hash
              trailer_hash 一律 = SHA-256(trailer bytes)；trailer 為空時即 SHA-256("") =
@@ -538,14 +541,14 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
 輸入：金鑰集合 {key_id → VK}、file bytes、預期的 vault_id 與 file_id
 
 1. len(file) < 243 或 > 80 MiB → CORRUPTED
-2. magic == "HSM1" 且 format == 1，否則 CORRUPTED / UNSUPPORTED_FORMAT
+2. magic == "HLS1" 且 format == 1，否則 CORRUPTED / UNSUPPORTED_FORMAT
 3. 解析 227-byte 標頭；header.vault_id == 預期、header.file_id == 預期，否則 CORRUPTED
 4. plaintext_len ≤ 64 MiB 且 len(file) == 227 + plaintext_len + 16 + merge_count × 48，否則 CORRUPTED
    trailer = 最後 merge_count × 48 bytes；SHA-256(trailer) == trailer_hash，否則 CORRUPTED
    （此檢查在任何配置之前；長度欄位本身也在 AAD 內，第 6 步會再驗證）
 5. 依 header.key_id 在金鑰集合中選擇 VK；集合中沒有（已清除或未知）→ STALE_GENERATION
    DEK = AES-256-GCM-Decrypt(key=VK, nonce=dek_nonce,
-                              aad="hsm-dek-wrap-v1" || vault_id || file_id || rev || key_id, ct=wrapped_dek)
+                              aad="holisec-dek-wrap-v1" || vault_id || file_id || rev || key_id, ct=wrapped_dek)
    失敗 → CORRUPTED
 6. compressed = AES-256-GCM-Decrypt(key=DEK, nonce=nonce, aad=header（kind=5 時再串接外層雜湊，8.7）, ct=ciphertext)
    失敗 → CORRUPTED
@@ -577,7 +580,7 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
 1. 取得金鑰集合 {key_id → VK}：以舊主密碼（5.1.1）或復原金鑰解開（所有未清除金鑰一起解）
 2. 新 salt = CSPRNG(32)；以新主密碼推導 PK_new（參數同標頭，或使用者選擇調高）
 3. 對每一把 k：k.wrappings.password = { kdf（共用同一組參數與 salt）, nonce=CSPRNG(12),
-      wrapped_vk = AES-256-GCM-Encrypt(key=PK_new, nonce, aad="hsm-vk-wrap-v1" || vault_id || k.key_id || k.gen, pt=VK_k) }
+      wrapped_vk = AES-256-GCM-Encrypt(key=PK_new, nonce, aad="holisec-vk-wrap-v1" || vault_id || k.key_id || k.gen, pt=VK_k) }
 4. 組新標頭：只替換每把金鑰的 wrappings.password；wrappings.recovery、vk_check、keys[] 的狀態、naming 全部不變
 5. 寫入新標頭修訂（parent_rev / parent_hash = 目前標頭 head；MAC 以 top 的 HK 計算），上傳
 6. 成功 → 本機記錄新 head；失敗 → 什麼都沒變，舊主密碼仍有效
@@ -733,11 +736,11 @@ stable(m; ∅)
 建立（init 或 regenerate）：
   RK        = CSPRNG(32 bytes)，以 Base32 顯示（52 字元，每 4 字一組）
   hkdf_salt = CSPRNG(32)
-  RK_key    = HKDF-SHA256(ikm=RK, salt=hkdf_salt, info="hsm-recovery-v1", len=32)
+  RK_key    = HKDF-SHA256(ikm=RK, salt=hkdf_salt, info="holisec-recovery-v1", len=32)
   對金鑰集合中每一把未清除的 k：
     k.wrappings.recovery = { hkdf_salt（共用）, nonce=CSPRNG(12),
                              wrapped_vk = AES-256-GCM-Encrypt(key=RK_key, nonce,
-                                            aad="hsm-vk-wrap-v1" || vault_id || k.key_id || k.gen, pt=VK_k) }
+                                            aad="holisec-vk-wrap-v1" || vault_id || k.key_id || k.gen, pt=VK_k) }
   寫入標頭修訂；RK 本身不存任何地方，顯示後 zeroize
 
 重新產生復原金鑰：替換每一把未清除金鑰的 wrappings.recovery，一次標頭寫入；主密碼不受影響。
@@ -750,8 +753,8 @@ stable(m; ∅)
 | 用途 | 演算法 | 參數與上限 |
 |------|--------|------|
 | 主密碼 → PK | Argon2id | 預設 256 MiB、3 次、4 並行；硬性上限 1 GiB、16 次、16 並行；32-byte salt；輸出 32 bytes |
-| 復原金鑰 → RK_key | HKDF-SHA256 | 32-byte salt、info `hsm-recovery-v1` |
-| VK → HK（標頭 MAC 金鑰） | HKDF-SHA256 | salt = vault_id、info `hsm-header-mac-v1` |
+| 復原金鑰 → RK_key | HKDF-SHA256 | 32-byte salt、info `holisec-recovery-v1` |
+| VK → HK（標頭 MAC 金鑰） | HKDF-SHA256 | salt = vault_id、info `holisec-header-mac-v1` |
 | 標頭完整性 | HMAC-SHA256 | 對 RFC 8785 正規化 JSON（去掉 `mac` 欄位）計算 |
 | 修訂鏈 | SHA-256 | `parent_hash` 與合併父雜湊 = 父修訂整個檔案 bytes 的雜湊；祖先只以雜湊做關係驗證；信任點亦以整個檔案雜湊記錄 |
 | 包裝 VK（PK、RK_key）、`vk_check` | AES-256-GCM | 12-byte 隨機 nonce、16-byte tag、AAD 含 vault_id、key_id 與世代；每把未清除金鑰各一份 |
@@ -768,14 +771,14 @@ stable(m; ∅)
 | Google 可見 | Google 不可見 |
 |-------------|---------------|
 | 資料夾名稱與檔案名稱（皆使用者自訂或預設） | 任何 Item 名稱、帳號、密碼、私鑰、備註、標籤 |
-| 檔案的 `appProperties`（`hsm.kind`、`hsm.vault_id`、`hsm.rev` 等，標示檔案用途與修訂鏈） | |
+| 檔案的 `appProperties`（`holisec.kind`、`holisec.vault_id`、`holisec.rev` 等，標示檔案用途與修訂鏈） | |
 | 檔案數量與各檔案大小 | Item 型別（檔名為隨機識別碼，內容加密） |
 | 檔案建立時間、修訂數量與頻率 | 主機名稱與位址 |
 | Vault 標頭中的 KDF 參數、salt、VK 的包裝密文（非機密） | 主密碼、PK、VK、DEK、復原金鑰 |
 
 檔案大小會透露粗略資訊（例如 RSA-4096 私鑰比 ed25519 大）。第一版接受此洩漏，第二階段可評估固定區塊填充（padding）。
 
-自訂檔名可讓 Drive 上的檔案看起來不像密碼庫，但 `appProperties` 仍標示用途，且檔案內容開頭有 `HSM1` magic bytes；自訂檔名是便利與偏好功能，不是安全機制，文件須明確說明。
+自訂檔名可讓 Drive 上的檔案看起來不像密碼庫，但 `appProperties` 仍標示用途，且檔案內容開頭有 `HLS1` magic bytes；自訂檔名是便利與偏好功能，不是安全機制，文件須明確說明。
 
 ### 5.3 本機安全
 
@@ -866,7 +869,7 @@ B：
   驗證 version；回 reply = { b_pub, b_name, b_vault_fp, nonce_b }
 雙方：
   shared     = X25519(own_priv, peer_pub)
-  transcript = SHA-256("hsm-xfer-v1" || hello bytes || reply bytes)
+  transcript = SHA-256("holisec-xfer-v1" || hello bytes || reply bytes)
   prk        = HKDF-Extract(salt = SHA-256(code), ikm = shared || transcript)
   k_a2b      = HKDF-Expand(prk, "a2b", 32)      # A → B 方向的 AES-256-GCM 金鑰
   k_b2a      = HKDF-Expand(prk, "b2a", 32)
@@ -922,12 +925,12 @@ B：
 │  │ CLI      │───▶│ ├ 金鑰引擎    │    │ 保存 VK     │ │
 │  └──────────┘    │ ├ 同步引擎    │    └──────────────┘ │
 │                  │ ├ 匯入引擎    │                     │
-│                  │ ├ 傳送引擎    │◀── 區網 TCP ──▶ 另一位使用者的 HSM
+│                  │ ├ 傳送引擎    │◀── 區網 TCP ──▶ 另一位使用者的 Holisec
 │                  │ └ 儲存層介面  │                     │
 │                  └──────┬───────┘                     │
 │            ┌────────────┼──────────────┐              │
 │            ▼            ▼              ▼              │
-│   ~/.config/hsm/   ~/.cache/hsm/   OS 金鑰圈           │
+│   ~/.config/holisec/   ~/.cache/holisec/   OS 金鑰圈           │
 │   設定、裝置 ID     加密快取、索引    OAuth token        │
 └────────────┬──────────────────────────────────────────┘
              │ HTTPS（Google Drive API v3）
@@ -935,7 +938,7 @@ B：
    ┌──────────────────────────────┐
    │ Google Drive（名稱皆為預設值）│
    │ My Drive/HolienSecretsManager│
-   │  ├ vault.hsm                 │
+   │  ├ vault.holisec                 │
    │  ├ index.enc                 │
    │  ├ log.enc                   │
    │  ├ hosts.enc                 │
@@ -964,12 +967,12 @@ B：
 
 | 路徑 | 內容 | 權限 |
 |------|------|------|
-| `~/.config/hsm/config.yaml` | Vault 清單、各 Vault 的 Drive 資料夾 ID、預設 Vault、agent 逾時等設定 | 0600 |
-| `~/.config/hsm/device_id` | 本裝置識別碼（UUID） | 0600 |
-| `~/.cache/hsm/<vault_id>/` | 各邏輯檔案 head 修訂的快取，以及 `sync_state.json`（每個 `file_id` 的 head rev、信任點 rev 與 SHA-256、金鑰世代、pending 標記、rev 與 Drive 檔案 ID 對應）。本機快取一律使用固定內部名稱（`header`、`index`、`log`、`hosts`、`items/<id>`），與 Drive 上使用者自訂的檔名無關 | Unix 0700 / 0600；Windows 僅本人 ACL |
-| OS 金鑰圈 | OAuth refresh token，鍵名 `hsm/<vault_id>/google` | 由系統管理 |
+| `~/.config/holisec/config.yaml` | Vault 清單、各 Vault 的 Drive 資料夾 ID、預設 Vault、agent 逾時等設定 | 0600 |
+| `~/.config/holisec/device_id` | 本裝置識別碼（UUID） | 0600 |
+| `~/.cache/holisec/<vault_id>/` | 各邏輯檔案 head 修訂的快取，以及 `sync_state.json`（每個 `file_id` 的 head rev、信任點 rev 與 SHA-256、金鑰世代、pending 標記、rev 與 Drive 檔案 ID 對應）。本機快取一律使用固定內部名稱（`header`、`index`、`log`、`hosts`、`items/<id>`），與 Drive 上使用者自訂的檔名無關 | Unix 0700 / 0600；Windows 僅本人 ACL |
+| OS 金鑰圈 | OAuth refresh token，鍵名 `holisec/<vault_id>/google` | 由系統管理 |
 
-Windows 對應路徑為 `%APPDATA%\hsm\` 與 `%LOCALAPPDATA%\hsm\cache\`。
+Windows 對應路徑為 `%APPDATA%\holisec\` 與 `%LOCALAPPDATA%\holisec\cache\`。
 
 ---
 
@@ -977,9 +980,9 @@ Windows 對應路徑為 `%APPDATA%\hsm\` 與 `%LOCALAPPDATA%\hsm\cache\`。
 
 ### 7.1 OAuth client 與權限範圍
 
-- 工具使用「桌面應用程式」類型的 OAuth client。此類 client 的 client secret 依 Google 文件不視為機密，可隨程式發布。
+- 工具使用「桌面應用程式」類型的 OAuth client，**由使用者自行在 Google Cloud Console 建立**（Q-02 已決議）：建立專案 → 啟用 Google Drive API → 設定 OAuth 同意畫面（External、測試模式、把自己加入測試使用者）→ 建立「桌面應用程式」憑證 → 取得 client ID 與 client secret。初始化精靈與 `holisec init --client-id ... --client-secret ...` 接受這兩個值；使用文件附逐步截圖。此類 client 的 client secret 依 Google 文件不視為機密，但仍只存於本機設定目錄（權限同 5.3）。
 - 預設權限範圍：`drive.file`。此範圍下工具只能看到自己建立的檔案與資料夾。**影響**：若使用者指定的資料夾路徑已存在但由其他方式建立（例如使用者在網頁手動建立），工具看不到它，會建立一個同名的新資料夾。文件須明確說明此行為，並提供 `--scope full` 選項改用完整 `drive` 範圍（需重新授權）。
-- OAuth client 的提供方式見待決議 Q-02：由專案內建，或由使用者自行在 Google Cloud Console 建立並提供 client ID。
+- 不內建任何 OAuth client；專案發布物不含 client ID 或 secret。測試模式的 refresh token 依 Google 政策可能在 7 天後失效，工具偵測到授權失效時引導使用者重新授權，並在文件說明「將同意畫面發布為正式」可避免此限制（個人專案不需 Google 驗證即可發布，但會顯示未驗證警告）。
 
 ### 7.2 資料夾解析與建立
 
@@ -993,7 +996,7 @@ Windows 對應路徑為 `%APPDATA%\hsm\` 與 `%LOCALAPPDATA%\hsm\cache\`。
    c. 找到多個 → 回報錯誤，要求使用者在 Drive 整理後重試（不自行猜測）。
    d. 找不到 → 建立資料夾，parent = 新資料夾 ID。
 4. 最終 parent 即 Vault 資料夾。
-5. 以 query「parent = 該資料夾 AND appProperties has { key='hsm.kind' and value='header' }」列出所有標頭修訂（不依賴檔名），依 appProperties 的 hsm.vault_id 分組：
+5. 以 query「parent = 該資料夾 AND appProperties has { key='holisec.kind' and value='header' }」列出所有標頭修訂（不依賴檔名），依 appProperties 的 holisec.vault_id 分組：
    - 多於一個 vault_id → 回報錯誤（資料夾內有多個 Vault），要求使用者整理。
    - 恰一個 vault_id → 這是既有 Vault。多個標頭修訂是正常情況（每次改密碼、改命名規則都會新增一個）。
      下載全部標頭修訂（都很小），解鎖後依 7.4 驗證 MAC 與雜湊鏈，找出 head：
@@ -1002,17 +1005,17 @@ Windows 對應路徑為 `%APPDATA%\hsm\` 與 `%LOCALAPPDATA%\hsm\cache\`。
      新裝置沒有標頭信任點，接受驗證通過的 head 並以它建立信任點（FR-SYNC-11 的限制在此適用）。
    - 找不到且資料夾為空 → 以使用者指定的命名規則建立新 Vault。
    - 找不到但資料夾非空 → 詢問使用者是否仍在此建立新 Vault。
-6. 在資料夾上設定 appProperties：{ "hsm.vault_id": <uuid>, "hsm.format": "1" }，供日後快速辨識。
-7. 連接既有 Vault 時另提供「以 vault_id 搜尋」途徑：query「appProperties has { key='hsm.kind' and value='header' }」列出此 Google 帳號下所有本工具建立的 Vault 標頭，使用者從清單選擇，不需記得資料夾路徑。
+6. 在資料夾上設定 appProperties：{ "holisec.vault_id": <uuid>, "holisec.format": "1" }，供日後快速辨識。
+7. 連接既有 Vault 時另提供「以 vault_id 搜尋」途徑：query「appProperties has { key='holisec.kind' and value='header' }」列出此 Google 帳號下所有本工具建立的 Vault 標頭，使用者從清單選擇，不需記得資料夾路徑。
 ```
 
 ### 7.3 檔案配置與命名規則
 
 所有名稱皆為**使用者自訂、系統提供預設值**。下表的「預設檔名」只是預設值，實際名稱由 Vault 標頭的 `naming` 區段決定（見 8.1）。
 
-| 命名規則鍵 | 預設檔名 | `hsm.kind` | 內容 | 是否加密 | 更新時機 |
+| 命名規則鍵 | 預設檔名 | `holisec.kind` | 內容 | 是否加密 | 更新時機 |
 |------------|----------|------------|------|:--:|------|
-| `header` | `vault.hsm` | `header` | Vault 標頭：格式版本、vault_id、各世代的 VK 包裝（主密碼、復原金鑰）、`vk_check`、命名規則、建立時間 | 部分（見 8.1） | 建立、變更主密碼、更新復原金鑰、修改命名規則、全面輪替提交點 |
+| `header` | `vault.holisec` | `header` | Vault 標頭：格式版本、vault_id、各世代的 VK 包裝（主密碼、復原金鑰）、`vk_check`、命名規則、建立時間 | 部分（見 8.1） | 建立、變更主密碼、更新復原金鑰、修改命名規則、全面輪替提交點 |
 | `index` | `index.enc` | `index` | 所有 Item 的摘要：id、名稱、型別、標籤、狀態、updated_at、目前版本號、到期日、綁定主機 | 是 | 任何 Item 新增、改名、改標籤、狀態變更 |
 | `log` | `log.enc` | `log` | 操作紀錄（滾動保留最近 5,000 筆） | 是 | 每次操作後（可批次延後上傳） |
 | `hosts` | `hosts.enc` | `hosts` | 所有 Host 紀錄與綁定關係 | 是 | Host 變更時 |
@@ -1025,7 +1028,7 @@ Windows 對應路徑為 `%APPDATA%\hsm\` 與 `%LOCALAPPDATA%\hsm\cache\`。
 - 每個邏輯檔案在 Drive 上是「一個或多個修訂檔案」。head 的判定見 7.4，不是「最新修改時間」。
 - `items_folder` 設為空字串時，Item 檔案直接放在 Vault 資料夾內，不建子資料夾。
 - 應用程式內的「資料夾」（4.3.1）與 Drive 上的資料夾無關：前者只是 `folders` 檔案內的邏輯分類，Drive 上的檔案配置不因此改變。
-- 工具讀寫檔案時一律先以 `appProperties`（`hsm.kind`、`hsm.vault_id`、`hsm.file_id`、`hsm.rev`、`hsm.parent_rev`、`hsm.gen`，合併修訂另有 `hsm.merge_parents`）查詢，並快取在 `sync_state.json`；檔名只在建立與重新命名時使用。
+- 工具讀寫檔案時一律先以 `appProperties`（`holisec.kind`、`holisec.vault_id`、`holisec.file_id`、`holisec.rev`、`holisec.parent_rev`、`holisec.gen`，合併修訂另有 `holisec.merge_parents`）查詢，並快取在 `sync_state.json`；檔名只在建立與重新命名時使用。
 - 所有檔案以 `multipart` 或 `resumable` 上傳；單檔小於 5 MB 用 multipart。
 - 修改命名規則（FR-DRIVE-16）流程：更新標頭 `naming` 並上傳 → 逐一 `files.update(name=...)` → 全部成功後更新本機快取的對應；任一步失敗時狀態畫面顯示「命名規則更新未完成」，可重試。
 
@@ -1042,7 +1045,7 @@ Windows 對應路徑為 `%APPDATA%\hsm\` 與 `%LOCALAPPDATA%\hsm\cache\`。
 
 因此只有 head 需要內容驗證；head 以下的整條祖先鏈都只需關係驗證。清除舊世代 VK 後，任何裝置（含全新裝置）仍能驗證完整歷史關係。
 
-**信任的來源**：appProperties（`hsm.file_id`、`hsm.rev`、`hsm.parent_rev`、`hsm.gen`）只用來**找候選檔案與安排下載順序**，不參與任何判定。本機保有兩個分開的集合：
+**信任的來源**：appProperties（`holisec.file_id`、`holisec.rev`、`holisec.parent_rev`、`holisec.gen`）只用來**找候選檔案與安排下載順序**，不參與任何判定。本機保有兩個分開的集合：
 
 | 集合 | 內容 | 生命週期 |
 |------|------|------|
@@ -1056,7 +1059,7 @@ Windows 對應路徑為 `%APPDATA%\hsm\` 與 `%LOCALAPPDATA%\hsm\cache\`。
 ```
 輸入：本機信任點 T = {rev_T, hash_T}（新裝置或首次同步時為空）；本機 verified_revs
 
-1. 候選：list appProperties hsm.file_id = X（分頁取完）→ 候選集合 C
+1. 候選：list appProperties holisec.file_id = X（分頁取完）→ 候選集合 C
 2. 下載：C 中每個「rev 不在 verified_revs 中」的候選都下載（候選只決定順序，不決定是否可跳過）。
    同一 rev 出現多個候選：全部下載；bytes 雜湊不同 → HASH_MISMATCH，此 file_id 標記需人工處理
 3. 內容驗證：對每個下載的修訂嘗試 5.1.3。
@@ -1129,7 +1132,7 @@ T 分出合法修訂 A（active）與 B（revoked）；攻擊者加入假修訂 
 
 ## 8. 資料格式
 
-### 8.1 Vault 標頭 `vault.hsm`
+### 8.1 Vault 標頭 `vault.holisec`
 
 JSON，明文可讀（不含機密），整份以 HMAC 保護。標頭也是一個邏輯檔案，有自己的雜湊鏈（`rev`、`parent_rev`、`parent_hash` 在 JSON 內並受 MAC 保護；appProperties 的副本只供搜尋）。
 
@@ -1177,7 +1180,7 @@ JSON，明文可讀（不含機密），整份以 HMAC 保護。標頭也是一�
     }
   ],
   "naming": {
-    "header": "vault.hsm",
+    "header": "vault.holisec",
     "index": "index.enc",
     "log": "log.enc",
     "hosts": "hosts.enc",
@@ -1198,7 +1201,7 @@ JSON，明文可讀（不含機密），整份以 HMAC 保護。標頭也是一�
 
 **完整性**
 
-- `mac.value = HMAC-SHA256(HK_gen, canonical(header without "mac"))`，其中 `HK_gen = HKDF-SHA256(ikm=VK_gen, salt=vault_id, info="hsm-header-mac-v1", len=32)`，`canonical` 為 RFC 8785（JSON Canonicalization Scheme）序列化。
+- `mac.value = HMAC-SHA256(HK_gen, canonical(header without "mac"))`，其中 `HK_gen = HKDF-SHA256(ikm=VK_gen, salt=vault_id, info="holisec-header-mac-v1", len=32)`，`canonical` 為 RFC 8785（JSON Canonicalization Scheme）序列化。
 - `mac.key_id` 必須等於此標頭的 top（最高世代的未清除金鑰，同世代多把時取 key_id 位元組序最大者）；讀取時用該金鑰驗證（任何解鎖的裝置都能以密碼包裝解出整個集合）。
 - **轉換授權**：從本機標頭信任點到 head 的路徑上，每一個相鄰轉換都必須在 5.1.6 的授權表內，每個標頭的 MAC 世代等於其 top，`max_gen` 與 top 單調不減，`keys[]` 只增不減；任一不符 → HEADER_TRANSITION_DENIED。head 的 MAC 金鑰必須由本機密碼從 head 自己的包裝解出（5.1.6「授權的錨點」）。新裝置沒有信任點時只檢查內部一致性，並以該 head 建立信任點（FR-SYNC-11 的限制在此適用）。
 - 舊標頭修訂（以已清除世代簽 MAC）無法再做 MAC 驗證，但可由子標頭的 `parent_hash` 做關係驗證（7.4）。
@@ -1206,8 +1209,8 @@ JSON，明文可讀（不含機密），整份以 HMAC 保護。標頭也是一�
 - 標頭的雜湊鏈驗證同 7.4：新 head 必須沿 `parent_rev` / `parent_hash` 走到本機的標頭信任點。
 - 未清除金鑰的合法組合只有 5.1.6 狀態機列出的四種形態（stable / migrating / settled / reverting，各自可附帶零或多把 `retired` 金鑰）；其他組合視為 CORRUPTED。
 - `devices[].last_seen_header_rev` 由各裝置每次同步時更新（僅供顯示）；輪替的交接確認存於 `rekey_ops[].acks`（5.1.6），不以 `devices` 的欄位判定。
-- 每把金鑰的 `wrappings.password` 與 `wrappings.recovery` 包裝的是該把 VK，AAD 為 `"hsm-vk-wrap-v1" || vault_id || key_id || gen`；所有未清除金鑰共用同一組 KDF 參數與 salt、同一個 `hkdf_salt`。
-- 每把金鑰的 `vk_check.ciphertext` 為字串 `"hsm-vk-check-v1"` 以該 VK 加密的結果，AAD 為 `vault_id || key_id || gen`。
+- 每把金鑰的 `wrappings.password` 與 `wrappings.recovery` 包裝的是該把 VK，AAD 為 `"holisec-vk-wrap-v1" || vault_id || key_id || gen`；所有未清除金鑰共用同一組 KDF 參數與 salt、同一個 `hkdf_salt`。
+- 每把金鑰的 `vk_check.ciphertext` 為字串 `"holisec-vk-check-v1"` 以該 VK 加密的結果，AAD 為 `vault_id || key_id || gen`。
 - 讀取標頭時先檢查 `format`、各 `kdf` 參數上限（FR-INIT-11）、base64 欄位長度，再做任何推導。
 - `naming` 為此 Vault 的命名規則，值皆為使用者自訂，上例為預設值。
 - `devices` 清單僅供顯示，不用於授權。
@@ -1218,7 +1221,7 @@ JSON，明文可讀（不含機密），整份以 HMAC 保護。標頭也是一�
 
 | 偏移 | 長度 | 欄位 | 說明 |
 |------|------|------|------|
-| 0 | 4 | magic | ASCII `HSM1` |
+| 0 | 4 | magic | ASCII `HLS1` |
 | 4 | 1 | format | 格式版本，目前為 1 |
 | 5 | 1 | kind | 1 = index、2 = item、3 = log、4 = hosts、5 = backup 內層、6 = folders、7 = settings |
 | 6 | 16 | vault_id | UUID bytes |
@@ -1340,7 +1343,7 @@ JSON，明文可讀（不含機密），整份以 HMAC 保護。標頭也是一�
 
 ```
 偏移  長度        欄位
-0     4           magic "HSMB"
+0     4           magic "HLSB"
 4     1           format（1）
 5     4           outer_len（big-endian；硬性上限 1 MiB，超過即拒絕，未檢查前不配置、不解析）
 9     outer_len   outer_json（UTF-8 明文；解析時限制巢狀深度 ≤ 8）
@@ -1474,10 +1477,10 @@ TCP，每則訊息為 `u32 length || u8 type || payload`，`length ≤ 1 MiB`（
 
 #### 9.2.1 基本
 
-- 執行檔名稱：`hsm`（待決議 Q-03）。
+- 執行檔名稱：`holisec`（待決議 Q-03）。
 - CLI 為 Phase 2 交付（第 12 章）；本節為完整目標規格。
 - 全域選項：`--vault NAME`、`--offline`、`--json`、`--quiet`、`--config PATH`。
-- 環境變數：`HSM_VAULT`、`HSM_PASSWORD_FILE`（從檔案讀主密碼，供腳本使用，文件須警告風險）。
+- 環境變數：`HOLISEC_VAULT`、`HOLISEC_PASSWORD_FILE`（從檔案讀主密碼，供腳本使用，文件須警告風險）。
 - 輸出：預設人類可讀，`--json` 輸出 JSON 供腳本使用。
 - Item 以名稱參照；名稱在同一 Vault 內唯一。支援 `--id` 以 ID 參照。
 
@@ -1485,117 +1488,117 @@ TCP，每則訊息為 `u32 length || u8 type || payload`，`length ≤ 1 MiB`（
 
 ```
 # 初始化與帳號
-hsm init [--drive-folder PATH] [--existing | --existing-from-list]
+holisec init --client-id ID --client-secret-file PATH [--drive-folder PATH] [--existing | --existing-from-list]
          [--name-header NAME] [--name-index NAME] [--name-log NAME] [--name-hosts NAME]
          [--name-items-folder NAME] [--item-pattern PATTERN]     # 皆有預設值，見 7.3
          [--no-recovery-key] [--scope file|full]
-hsm auth status
-hsm auth revoke
-hsm unlock                         # 啟動或喚醒 agent（P1）
-hsm lock
-hsm vault list
-hsm vault info                     # 含資料夾路徑與目前命名規則
-hsm vault rename-files [--name-header NAME] [...] [--item-pattern PATTERN]   # P1
-hsm vault move --drive-folder PATH # P1
-hsm vault change-password
-hsm vault recovery regenerate
-hsm vault recovery unlock          # 以復原金鑰解鎖並重設主密碼
-hsm vault rekey --reason password|recovery|unknown|routine [--new-recovery-key]   # 全面輪替（新世代）
-hsm vault rekey --status | --resume | --abort | --finalize   # 續行 / 取消（僅 routine 可，進入 reverting）/ 嘗試 settled → stable
-hsm vault rekey --ack                # 本裝置寫入此輪替操作的交接確認（pending 已清、已切換寫入世代）
-hsm vault devices list | remove <device_id>
+holisec auth status
+holisec auth revoke
+holisec unlock                         # 啟動或喚醒 agent（P1）
+holisec lock
+holisec vault list
+holisec vault info                     # 含資料夾路徑與目前命名規則
+holisec vault rename-files [--name-header NAME] [...] [--item-pattern PATTERN]   # P1
+holisec vault move --drive-folder PATH # P1
+holisec vault change-password
+holisec vault recovery regenerate
+holisec vault recovery unlock          # 以復原金鑰解鎖並重設主密碼
+holisec vault rekey --reason password|recovery|unknown|routine [--new-recovery-key]   # 全面輪替（新世代）
+holisec vault rekey --status | --resume | --abort | --finalize   # 續行 / 取消（僅 routine 可，進入 reverting）/ 嘗試 settled → stable
+holisec vault rekey --ack                # 本裝置寫入此輪替操作的交接確認（pending 已清、已切換寫入世代）
+holisec vault devices list | remove <device_id>
 
 # 同步與狀態
-hsm sync [--rebuild-index]
-hsm status                         # pending、衝突、到期、逾期輪替、missing
-hsm resolve <name> --keep local|remote|<version>
-hsm verify
-hsm gc                             # 第一版只清理本機快取與垃圾桶 Item 的內容，不刪除 Drive 修訂
+holisec sync [--rebuild-index]
+holisec status                         # pending、衝突、到期、逾期輪替、missing
+holisec resolve <name> --keep local|remote|<version>
+holisec verify
+holisec gc                             # 第一版只清理本機快取與垃圾桶 Item 的內容，不刪除 Drive 修訂
 
 # 帳密與通用項目
-hsm list [--type TYPE] [--tag TAG] [--status S] [--folder PATH [--recurse]]
-hsm search <query>
-hsm add <name> --type credential [--username U] [--generate [--length N] | --stdin | --password-file PATH] [--url URL] [--tag T ...] [--folder PATH]
+holisec list [--type TYPE] [--tag TAG] [--status S] [--folder PATH [--recurse]]
+holisec search <query>
+holisec add <name> --type credential [--username U] [--generate [--length N] | --stdin | --password-file PATH] [--url URL] [--tag T ...] [--folder PATH]
                                    # 未給密碼來源時以隱藏輸入提示；沒有 --password VALUE 這種參數
-hsm add <name> --type generic [--from-file PATH | --fields-json PATH | --field KEY ...]
+holisec add <name> --type generic [--from-file PATH | --fields-json PATH | --field KEY ...]
                                    # --field KEY 只給欄位名稱，值以隱藏輸入提示
-hsm show <name> [--version N]      # 顯示非機密欄位與版本列表
-hsm get <name> [--field password] [--version N] [--copy | --stdout]
-hsm totp <name> [--copy]
-hsm edit <name> [--username U] [--generate | --stdin | --password-file PATH | --prompt-password] [--url URL] [--notes-file PATH] [--expires DATE]
-hsm tag <name> [--add T] [--remove T]
-hsm rename <name> <new-name>
-hsm versions <name>
-hsm rm <name>
-hsm restore <name>                 # 從垃圾桶還原
-hsm generate-password [--length N] [--no-symbols] [--passphrase [--words N]]
+holisec show <name> [--version N]      # 顯示非機密欄位與版本列表
+holisec get <name> [--field password] [--version N] [--copy | --stdout]
+holisec totp <name> [--copy]
+holisec edit <name> [--username U] [--generate | --stdin | --password-file PATH | --prompt-password] [--url URL] [--notes-file PATH] [--expires DATE]
+holisec tag <name> [--add T] [--remove T]
+holisec rename <name> <new-name>
+holisec versions <name>
+holisec rm <name>
+holisec restore <name>                 # 從垃圾桶還原
+holisec generate-password [--length N] [--no-symbols] [--passphrase [--words N]]
 
 # 伺服器金鑰
-hsm key generate <name> [--algorithm ed25519|rsa-4096|rsa-2048|ecdsa-p256] [--purpose ssh|tls|signing|other] [--comment TEXT] [--passphrase] [--tag T ...]
-hsm key import <name> --private-key PATH [--public-key PATH] [--purpose ...]
-hsm key import --scan [--dir ~/.ssh]
-hsm key import-public <name> --public-key PATH
-hsm key show <name>                # metadata、公鑰、指紋、版本、綁定主機
-hsm key public <name> [--format openssh|pem] [--out PATH | --copy]
-hsm key private <name> [--format openssh|pkcs8|pkcs1] [--out PATH | --stdout] [--version N] [--force] [--strip-passphrase]
+holisec key generate <name> [--algorithm ed25519|rsa-4096|rsa-2048|ecdsa-p256] [--purpose ssh|tls|signing|other] [--comment TEXT] [--passphrase] [--tag T ...]
+holisec key import <name> --private-key PATH [--public-key PATH] [--purpose ...]
+holisec key import --scan [--dir ~/.ssh]
+holisec key import-public <name> --public-key PATH
+holisec key show <name>                # metadata、公鑰、指紋、版本、綁定主機
+holisec key public <name> [--format openssh|pem] [--out PATH | --copy]
+holisec key private <name> [--format openssh|pkcs8|pkcs1] [--out PATH | --stdout] [--version N] [--force] [--strip-passphrase]
                                    # 預設只匯出 active 版本；retired 需 --version 並警告；revoked 需 --force
-hsm key install <name> [--dir ~/.ssh] [--ssh-config --host HOSTNAME]
-hsm key ssh-add <name> [--lifetime 1h]
-hsm key rotate <name> [--note TEXT]
-hsm key revoke <name> [--version N | --all] --reason TEXT   # 本機標記；受影響的 installed 綁定變為 removal_pending
-hsm key find --fingerprint SHA256:...
+holisec key install <name> [--dir ~/.ssh] [--ssh-config --host HOSTNAME]
+holisec key ssh-add <name> [--lifetime 1h]
+holisec key rotate <name> [--note TEXT]
+holisec key revoke <name> [--version N | --all] --reason TEXT   # 本機標記；受影響的 installed 綁定變為 removal_pending
+holisec key find --fingerprint SHA256:...
 
 # TLS 憑證
-hsm cert import <name> --cert PATH --key PATH [--chain PATH]
-hsm cert show <name>
-hsm cert export <name> [--cert-out PATH] [--key-out PATH] [--chain-out PATH]
-hsm cert renew <name> --cert PATH --key PATH [--chain PATH]
-hsm cert expiring [--within-days N]
+holisec cert import <name> --cert PATH --key PATH [--chain PATH]
+holisec cert show <name>
+holisec cert export <name> [--cert-out PATH] [--key-out PATH] [--chain-out PATH]
+holisec cert renew <name> --cert PATH --key PATH [--chain PATH]
+holisec cert expiring [--within-days N]
 
 # 主機
-hsm host list [--env ENV]
-hsm host add <name> --address ADDR [--port N] [--env ENV] [--host-key-fingerprint FP]
-hsm host show <name>
-hsm host edit <name> [...]
-hsm host rm <name>
-hsm host bind <host> <key> [--version N] --remote-user USER [--usage TEXT]
-hsm host unbind <host> <key> [--version N] --remote-user USER
-hsm host deploy-state <host> <key> --version N --remote-user USER --set declared|installed|removal_pending|removed
-hsm host pending                   # 所有 removal_pending 綁定（伺服器端待處理清單）
-hsm host authorized-keys <host> [--out PATH]   # 只含 active 版本，retired/revoked 仍 installed 者以註解警告
+holisec host list [--env ENV]
+holisec host add <name> --address ADDR [--port N] [--env ENV] [--host-key-fingerprint FP]
+holisec host show <name>
+holisec host edit <name> [...]
+holisec host rm <name>
+holisec host bind <host> <key> [--version N] --remote-user USER [--usage TEXT]
+holisec host unbind <host> <key> [--version N] --remote-user USER
+holisec host deploy-state <host> <key> --version N --remote-user USER --set declared|installed|removal_pending|removed
+holisec host pending                   # 所有 removal_pending 綁定（伺服器端待處理清單）
+holisec host authorized-keys <host> [--out PATH]   # 只含 active 版本，retired/revoked 仍 installed 者以註解警告
 
 # 備份與匯入匯出
-hsm export --encrypted --out PATH [--backup-password] [--include-log] [--include-trash]
-hsm export --encrypted --out PATH --select <name>... | --folder PATH [--no-recurse] [--no-private-keys] [--backup-password]   # 選擇性匯出
-hsm import --from PATH --merge [--into FOLDER] [--on-duplicate version|skip|new] [--dry-run]   # 合併匯入選擇性匯出檔
+holisec export --encrypted --out PATH [--backup-password] [--include-log] [--include-trash]
+holisec export --encrypted --out PATH --select <name>... | --folder PATH [--no-recurse] [--no-private-keys] [--backup-password]   # 選擇性匯出
+holisec import --from PATH --merge [--into FOLDER] [--on-duplicate version|skip|new] [--dry-run]   # 合併匯入選擇性匯出檔
 
 # 資料夾
-hsm folder list [--tree]
-hsm folder create <path> [--create-parents]
-hsm folder rename <path> <new-name>
-hsm folder move <path> --to <parent-path>
-hsm folder rm <path> [--move-contents-to <parent-path> | --trash-contents]
-hsm mv <name>... --folder <path>   # 移動 Item
+holisec folder list [--tree]
+holisec folder create <path> [--create-parents]
+holisec folder rename <path> <new-name>
+holisec folder move <path> --to <parent-path>
+holisec folder rm <path> [--move-contents-to <parent-path> | --trash-contents]
+holisec mv <name>... --folder <path>   # 移動 Item
 
 # 區網傳送（P1）
-hsm xfer receive [--port N] [--into FOLDER]           # 進入接收模式，顯示 IP、埠、接收代碼、SAS
-hsm xfer send --to IP[:PORT] --code CODE (--select <name>... | --folder PATH) [--with-private-keys]
+holisec xfer receive [--port N] [--into FOLDER]           # 進入接收模式，顯示 IP、埠、接收代碼、SAS
+holisec xfer send --to IP[:PORT] --code CODE (--select <name>... | --folder PATH) [--with-private-keys]
                                                        # 顯示 SAS，提示再驗證（主密碼或 TOTP），等待對方接受
-hsm xfer totp enroll | disable | test
-hsm export --plain --out PATH      # 二次確認
-hsm restore --from PATH [--to-drive-folder PATH | --to-local DIR]   # 可在全新電腦、無 Google 授權下執行
-hsm import --from PATH [--format hsm|chrome-csv|bitwarden|1password|keepass|firefox-csv|edge-csv] [--on-duplicate version|skip|new] [--dry-run]
-hsm import --chrome [--profile NAME] [--on-duplicate ...] [--dry-run]   # 直接讀取 Chrome 設定檔（P1）
+holisec xfer totp enroll | disable | test
+holisec export --plain --out PATH      # 二次確認
+holisec restore --from PATH [--to-drive-folder PATH | --to-local DIR]   # 可在全新電腦、無 Google 授權下執行
+holisec import --from PATH [--format holisec|chrome-csv|bitwarden|1password|keepass|firefox-csv|edge-csv] [--on-duplicate version|skip|new] [--dry-run]
+holisec import --chrome [--profile NAME] [--on-duplicate ...] [--dry-run]   # 直接讀取 Chrome 設定檔（P1）
 
 # 紀錄
-hsm log [--since T] [--action A] [--item NAME] [--limit N]
+holisec log [--since T] [--action A] [--item NAME] [--limit N]
 ```
 
 #### 9.2.3 行為規範
 
 - `get`、`key private`、`cert export` 預設寫檔或複製到剪貼簿；輸出到 stdout 需明確 `--stdout`，且 stdout 為終端時再次確認。
 - **沒有任何參數接受命令列明文機密**（密碼、passphrase、TOTP 秘密、欄位值）。機密只能來自隱藏輸入提示、`--stdin`、`--password-file PATH`（檔案須為僅本人可讀，否則拒絕）或 `--generate`。這避免機密進入 shell history、程序參數列表與行程監控工具。
-- 所有需要主密碼的指令在非 TTY 且無 agent、無 `HSM_PASSWORD_FILE` 時，以結束碼 3 失敗。
+- 所有需要主密碼的指令在非 TTY 且無 agent、無 `HOLISEC_PASSWORD_FILE` 時，以結束碼 3 失敗。
 - 任何會寫入含明文機密檔案的指令，都以 5.3 的「建立時即為僅本人可讀」方式建立檔案。
 - 結束碼：0 成功、1 一般錯誤、2 參數錯誤、3 未解鎖或主密碼錯誤、4 Google 授權失效、5 網路或 Drive 錯誤、6 存在衝突需處理、7 區網傳送失敗。
 
@@ -1613,14 +1616,14 @@ hsm log [--since T] [--action A] [--item NAME] [--limit N]
 | 測試 | 加密層與檔案格式單元測試覆蓋率 ≥ 90%；金鑰匯入匯出與 OpenSSH / OpenSSL 做互通測試；下列**復原導向驗收測試**為 Phase 1a 的結束條件，比覆蓋率更優先：(a) 變更主密碼與全面輪替的每一個步驟之後強制中斷，重啟後 Vault 必須仍可用主密碼與復原金鑰開啟且資料完整；(b) 兩台模擬裝置離線各自修改同一 Item、同一 hosts、同時改密碼，上線後必須偵測分支且雙方資料皆保留；(c) 清空本機環境、不給 Google 授權，只用備份檔加主密碼或復原金鑰還原，所有 Item 與金鑰可讀；(d) 竄改檔案長度欄位、KDF 參數、parent_rev、標頭 MAC 保護的欄位與回滾整份資料，工具必須拒絕並給出對應錯誤碼；(e) 寫入私鑰與明文匯出時在 Windows 與 Unix 驗證檔案建立瞬間即為僅本人可讀；(f) 偽造中間修訂（合法 appProperties、偽造或替換的內容）使新 head 看似信任點的後代，必須被 HASH_MISMATCH 或 MISSING_PARENT 擋下；(g) 舊世代裝置在輪替進入 `settled` 之後才上傳延遲的修訂，資料必須被遷移且不遺失；(h) 取消輪替途中斷電，重啟後兩把金鑰皆可用且能續行或完成反向遷移；(i) 離線裝置在輪替完成並清除舊世代後重新連線，其 pending 修訂必須能以本機舊標頭快取與舊憑證解出並重新上傳；(j) 假子修訂隱藏撤銷分支：T 分出 active 與 revoked 兩個合法修訂，加入一個宣稱以 revoked 為父的無效檔案，同步後必須仍回報分支衝突；(k) 舊 VK 簽署降級標頭：以已清除或 retired 世代的 VK 製作 parent 指向目前信任標頭、top 較低的 stable 標頭，必須被 HEADER_TRANSITION_DENIED 或 HEADER_MAC_INVALID 擋下；(l) 完成輪替、清除舊世代、再改一次主密碼後，全新電腦只用最新主密碼同步，必須能驗證完整歷史並採用最新資料；(m) 前進輪替進入 settled 後，某台裝置尚未寫入此 op 的 forward 確認（即使它曾看過新世代，或對先前被取消的 op 寫過確認），必須無法進入 stable(m; ∅) 清除舊世代；(n) 取消後再次輪替，目標世代必須為歷來最大世代加一，且所有歷史修訂的世代號仍能唯一對應金鑰；(o) 一般非合併檔案與備份檔寫入後立即解密成功（含空 trailer 雜湊）；(p) 取消輪替完成後鎖定、重啟，並以全新裝置用目前主密碼解鎖與同步，標頭 MAC 與狀態皆驗證通過；(q) 離線裝置跨過另一台完成的完整輪替（stable → migrating → settled → stable）後重新同步，路徑驗證通過且資料可用；(r) 兩台裝置以相同 parent 各自寫入後，必須進入衝突處理而不是回滾警告；(s) 保留本機快取、在 Drive 刪除某個修訂或整個檔案，同步必須回報 REMOTE_DELETED 或 ROLLBACK_SUSPECTED 並能從本機快取重新上傳；(t) 外洩輪替進入 settled 後，以已外洩的舊 VK 製作通過 AES-GCM 驗證的修訂，分別把 parent 指向新世代 head（必須 GENERATION_REGRESSION）與指向舊世代修訂（必須隔離、不遷移、不出現在衝突處理），且隔離內容只能由使用者明確重新提交；(u) 兩台裝置同時啟動輪替並各自以不同金鑰寫入後，合併標頭必須保留兩把金鑰，兩邊資料都能解開，遷移與衝突處理完成後所有資料都在 active 金鑰下；(v) 連續取消兩次、改一次密碼、重新產生復原金鑰後，全新裝置以目前主密碼與以復原金鑰各自解鎖，必須解出整個金鑰集合並能同步與讀取所有歷史；(w) 兩台裝置離線各自建立與改名資料夾、移動 Item，上線後樹合併正確、同名衝突有提示、沒有 Item 遺失或落到不存在的資料夾；(x) 勾選資料夾做選擇性匯出，在另一個 Vault 合併匯入到指定資料夾，路徑結構一致、重複規則正確、匯出檔不能被當作完整備份還原；(y) 區網傳送：中間人同時與 A、B 建通道時 SAS 不符必須中止；錯誤的接收代碼必須在確認步驟失敗；再驗證失敗 5 次中止；B 未接受前 A 不送任何 ITEM；B 收到的內容雜湊不符時中止且不寫入；傳送完成後兩端磁碟上不存在明文；B 的資料夾結構與 A 勾選的結構一致。 |
 | 相依性 | 不依賴專案方任何線上服務；除 Google Drive API 外不連線其他主機（含不做自動更新檢查，除非使用者明確啟用）。 |
 | 可觀測性 | `--verbose` 輸出 Drive API 呼叫摘要（方法、檔案 ID、狀態碼），永不輸出內容或 token。 |
-| 國際化 | CLI 訊息繁體中文與英文雙語，預設依系統語系，`HSM_LANG` 可覆寫。 |
+| 國際化 | CLI 訊息繁體中文與英文雙語，預設依系統語系，`HOLISEC_LANG` 可覆寫。 |
 | 授權 | MIT。相依套件需為相容授權。 |
 
 ---
 
 ## 11. 建議技術選型
 
-以下為建議，供第 13 章決議；未定案前不應開始實作。
+語言已決議為 Go（Q-01）。下表其餘項目為建議，可在 Phase 0 的 repo 骨架階段定案。
 
 | 層級 | 建議 | 理由 |
 |------|------|------|
@@ -1659,9 +1662,9 @@ hsm log [--since T] [--action A] [--item NAME] [--limit N]
 
 | 編號 | 問題 | 建議 | 影響 |
 |------|------|------|------|
-| Q-01 | 實作語言 | Go（見第 11 章） | 全部 |
-| Q-02 | OAuth client 由誰提供：專案內建一組（需 Google 驗證流程，否則顯示「未經驗證的應用程式」警告且測試使用者上限 100 人），或由使用者自行建立 GCP 專案並提供 client ID | 第一版由使用者自行建立並以 `hsm init --client-id ... --client-secret ...` 提供；文件附步驟。若日後公開發布再申請驗證 | FR-DRIVE-01、7.1 |
-| Q-03 | 執行檔名稱：`hsm` 易與硬體安全模組混淆 | 改為 `holisec` 或 `hsecret` | 第 9 章、6.3 目錄名 |
+| Q-01 | 實作語言 | **已決議（2026-10-28）**：Go，技術選型見第 11 章 | 全部 |
+| Q-02 | OAuth client 由誰提供：專案內建一組（需 Google 驗證流程，否則顯示「未經驗證的應用程式」警告且測試使用者上限 100 人），或由使用者自行建立 GCP 專案並提供 client ID | **已決議（2026-10-28）**：第一版由使用者自行在 Google Cloud Console 建立桌面應用程式類型的 OAuth client，於初始化時提供 client ID 與 client secret；使用文件附逐步截圖說明。若日後公開發布再評估申請驗證 | FR-DRIVE-01、FR-DRIVE-18、7.1 |
+| Q-03 | 執行檔名稱：原本的 `hsm` 易與硬體安全模組混淆 | **已決議（2026-10-28）**：改為 `holisec`。連帶更名：設定目錄 `~/.config/holisec/`、環境變數 `HOLISEC_*`、Drive appProperties 前綴 `holisec.`、預設標頭檔名 `vault.holisec`、檔案 magic `HLS1` / `HLSB`、金鑰推導 domain 字串 `holisec-*`、文件簡稱 Holisec | 全文 |
 | Q-04 | 預設 OAuth 範圍 `drive.file` 造成「看不到使用者手動建立的同名資料夾」 | 維持 `drive.file` 為預設，提供 `--scope full` | 7.1、7.2 |
 | Q-05 | Drive 為唯一真實來源，或本機為主、Drive 為備份 | Drive 為真實來源（本文件採此設計），以支援多裝置 | 4.5 |
 | Q-06 | 介面優先順序：GUI 與 CLI 是否都在 Phase 1 | GUI 為 Phase 1，CLI 為 Phase 2（本文件採此安排）；若使用者日常以終端機操作金鑰為主，可對調 | 4.8、第 12 章 |
@@ -1672,7 +1675,7 @@ hsm log [--since T] [--action A] [--item NAME] [--limit N]
 | Q-09 | 版本保留數量與垃圾桶保留期 | 10 版、30 天 | FR-CRED-02、FR-KEY-25 |
 | Q-10 | 操作紀錄是否同步到 Drive，或只留本機 | 同步（可看到各裝置紀錄） | FR-LOG-02 |
 | Q-11 | 是否需要支援 Google Workspace 帳號的共用雲端硬碟（Shared Drive） | 第一版不支援，只用 My Drive | 7.2 |
-| Q-14 | 預設名稱：資料夾 `HolienSecretsManager`、檔案 `vault.hsm` / `index.enc` / `log.enc` / `hosts.enc` / `items/{id}.enc` 是否合適 | 採用上述預設；若 Q-03 改了執行檔名稱，副檔名 `.hsm` 一併更名 | 7.3 |
+| Q-14 | 預設名稱：資料夾 `HolienSecretsManager`、檔案 `vault.holisec` / `index.enc` / `log.enc` / `hosts.enc` / `items/{id}.enc` 是否合適 | **已決議（2026-10-28）**：採用上述預設，標頭檔名隨 Q-03 定為 `vault.holisec` | 7.3 |
 | Q-15 | 命名規則是否允許每台裝置各自不同（只存本機設定） | 否，存於 Vault 標頭、所有裝置一致，避免同一 Vault 在不同裝置產生不同檔名 | FR-DRIVE-13 |
 | Q-16 | 第一版不清理修訂，Drive 空間成長是否可接受（估計：每次 Item 寫入數 KB，索引每次重寫 ≈ Item 數 × 100 bytes） | 可接受；Phase 2 以檢查點設計清理 | FR-SYNC-12/19 |
 | Q-17 | 全新裝置首次同步的回滾辨識：是否要在標頭加入「索引摘要雜湊 + 簽章」等機制 | 第一版不做，以人工比對緩解（FR-SYNC-11）；列為 Phase 3 研究 | FR-SYNC-10/11 |
@@ -1692,7 +1695,7 @@ hsm log [--since T] [--action A] [--item NAME] [--limit N]
 本文件在下列假設下撰寫，任一假設不成立時需修訂對應章節：
 
 1. 使用者為單一個人；不需要與他人共享任何 Item。
-2. 使用者擁有個人 Google 帳號，且願意在 Google Cloud Console 建立 OAuth client（或接受專案內建 client 的未驗證警告）。
+2. 使用者擁有個人 Google 帳號，且願意依文件在 Google Cloud Console 建立自己的 OAuth client（Q-02 已決議）。
 3. 「伺服器 private + public key」主要指 SSH 金鑰與 TLS 私鑰；PGP 與程式碼簽章金鑰可用 `purpose=signing` 保存，但不提供專屬功能。
 4. 系統不負責簽發憑證，只保管。
 5. 使用者的電腦可視為可信環境；本工具不防禦本機惡意軟體。
