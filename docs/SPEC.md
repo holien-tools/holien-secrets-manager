@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |------|------|
-| 文件版本 | 0.8.0（草稿） |
+| 文件版本 | 0.9.0（草稿） |
 | 狀態 | 待審閱 |
 | 最後更新 | 2026-10-28 |
 | 適用範圍 | 全專案（單機桌面應用程式、CLI、Google Drive 儲存層） |
@@ -16,6 +16,8 @@
 > 0.4.0 版變更：Drive 上的**資料夾名稱與所有檔案名稱皆由使用者自訂**，系統只提供預設值；檔案辨識改以 Drive 檔案屬性為準，不依賴檔名。
 >
 > 0.5.0 版變更：新增 5.1.1 至 5.1.6，逐步說明存放檔案的**加密與解密流程**、金鑰推導、主密碼變更與復原。
+>
+> 0.9.0 版變更（依第四輪外部審閱意見）：空 trailer 的雜湊統一為真正的 SHA-256(空)；**取消輪替不再清除新世代**，被取消的世代以 `retired` 留在標頭，等下一次前進的輪替 settle 時一併清除，使「MAC 用最高未清除世代」在每個轉換都成立；狀態機改以（active 世代, retired 集合）描述；標頭驗證改為**從信任點沿雜湊鏈逐步檢查每個相鄰轉換**，並說明授權的錨點是 head 的 MAC 金鑰必須能用本機密碼從 head 自己的包裝解出；回滾判定改為「沒有任何 head 是信任點的後代」，有共同祖先的兄弟分支進入正常衝突處理；同步區分「曾驗證的歷史」與「本次遠端存在的修訂」，遠端刪除可被偵測；新增五個驗收案例。
 >
 > 0.8.0 版變更（依第三輪外部審閱意見）：head 判定改為**只有已驗證的子修訂才能取消父修訂的 head 身分**，所有新候選一律下載驗證；祖先關係改為**只靠雜湊鏈驗證、不需解密**（子修訂的 `parent_hash` 覆蓋父修訂完整 bytes），合併父節點移到明文 trailer；標頭加入**狀態轉換授權表**，MAC 金鑰由轉換決定，舊世代金鑰無法簽出降級標頭，因外洩而起的輪替不可取消；交接確認改為綁定**輪替操作 ID 與方向**並要求 pending 已清；**世代編號永不重用**，世代條目只標記 `purged` 不移除；修正「舊憑證無法解開任何東西」與事故清單的說法；新增五個驗收案例。
 >
@@ -272,7 +274,8 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
 | FR-SYNC-08 | P0 | 涉及撤銷、刪除、金鑰輪替、狀態變更的分支一律由使用者處理；解決時產生一個新修訂，trailer 列出所有被合併的 head（rev 與雜湊），使它們都成為祖先。 |
 | FR-SYNC-09 | P0 | 衝突介面逐欄位並排顯示兩個 head 的差異（機密值遮罩，可展開），使用者可選擇其一或逐欄位挑選。未解決前該 Item 可檢視（同時顯示所有 head 並加警示），但不可寫入。 |
 | FR-SYNC-18 | P0 | 衝突未解決時，**敏感操作一律拒絕**：匯出私鑰、安裝、載入 agent、輸出 `authorized-keys`、複製密碼。若使用者要在解決前操作，必須明確選定某一個分支（介面顯示該分支的狀態，例如「此分支已撤銷」），且操作紀錄註明所選分支。不得因「較新」而自動選擇 active 分支。 |
-| FR-SYNC-10 | P0 | 回滾防護：每台裝置在 `sync_state.json` 記錄每個 `file_id`（含標頭）的信任點（rev、整個檔案的 SHA-256、金鑰世代）。同步時若 Drive 上的 head 無法沿已驗證雜湊鏈走到信任點，視為疑似回滾，回報 `ROLLBACK_SUSPECTED` 並停止寫入，需使用者確認後才接受新鏈並重設信任點。 |
+| FR-SYNC-10 | P0 | 回滾防護：每台裝置在 `sync_state.json` 記錄每個 `file_id`（含標頭）的信任點（rev、整個檔案的 SHA-256、金鑰世代）。同步時若**沒有任何** head 能沿已驗證雜湊鏈走到信任點，或信任點已不存在於遠端，視為疑似回滾，回報 `ROLLBACK_SUSPECTED` 並停止寫入，需使用者確認後才接受新鏈並重設信任點。與信任點有共同祖先的其他 head 是合法的並行分支，走衝突處理，不是回滾（7.4）。 |
+| FR-SYNC-20 | P0 | 遠端存在性：head 與回滾判定只使用「本次 list 確認存在於 Drive」的修訂；本機累積的驗證登錄只用於免重複下載與離線復原。遠端缺少本機已知的修訂時回報 `REMOTE_DELETED` 或 `ROLLBACK_SUSPECTED`，並提供從本機快取重新上傳。 |
 | FR-SYNC-11 | P0 | 回滾防護的已知限制：全新裝置第一次同步沒有獨立的信任紀錄，無法辨識整份資料是否已被換回舊版本。文件須寫明；緩解方式為 GUI 顯示索引摘要雜湊與最後修訂時間，使用者可與另一台裝置或備份檔人工比對。 |
 | FR-SYNC-12 | P0 | **第一版不清理任何修訂。** 祖先驗證需要完整雜湊鏈，而各裝置的信任點只存在本機，無法得知離線裝置仍信任哪一個修訂；刪除任何中間修訂都可能使其無法重新連接。`gc` 在第一版只處理本機快取與垃圾桶中 Item 的內容清除，不刪除 Drive 上的修訂。 |
 | FR-SYNC-19 | P1 | 歷史清理（Phase 2 設計）：以「經驗證的檢查點」區分「刪除歷史內容」與「刪除歷史關係」。檢查點是一個受驗證的修訂，記錄所有 file_id 當時的 head rev 與雜湊；裝置若信任某個檢查點（或其後代），即可接受檢查點之前的修訂被刪除。裝置的信任點早於最舊檢查點時，退回 FR-SYNC-10 的人工確認。 |
@@ -406,8 +409,8 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
      HK = HKDF-SHA256(ikm=VK_{mac.gen}, salt=vault_id, info="hsm-header-mac-v1", len=32)
      HMAC-SHA256(HK, canonical(header 去掉 mac 欄位)) == header.mac.value，否則 HEADER_MAC_INVALID
      通過後才可採用 rev / parent_rev / parent_hash / generations[].status / rekey_ops / naming / devices
-5. 標頭信任點與轉換授權：sync_state 有標頭信任點 P 時，此標頭 H 必須能沿雜湊鏈驗證回到 P（7.4），
-     且 P 到 H 的狀態轉換必須在 8.1 的授權表內、且 H 的 mac.gen 等於該轉換授權的世代，否則 HEADER_TRANSITION_DENIED
+5. 標頭信任點與轉換授權：sync_state 有標頭信任點 P 時，此標頭 H 必須能沿雜湊鏈驗證回到 P，
+     且 P 到 H 的路徑上每一個相鄰轉換都在 5.1.6 的授權表內（5.1.6「路徑驗證」），否則 HEADER_TRANSITION_DENIED
 6. PK zeroize；VK 保存在記憶體直到鎖定
 
 以復原金鑰解鎖：
@@ -442,7 +445,9 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
              trailer = 合併父列表（每筆 rev 16 bytes + hash 32 bytes），一般寫入為空
              header = "HSM1" || format(1) || kind || vault_id || file_id || rev || parent_rev ||
                       parent_hash || generation(g) || dek_nonce || wrapped_dek || nonce || plaintext_len ||
-                      merge_count || trailer_hash（SHA-256(trailer)，空 trailer 為全零）
+                      merge_count || trailer_hash
+             trailer_hash 一律 = SHA-256(trailer bytes)；trailer 為空時即 SHA-256("") =
+               e3b0c442 98fc1c14 9afbf4c8 996fb924 27ae41e4 649b934c a495991b 7852b855（沒有全零特例）
              其中 nonce = CSPRNG(12)、plaintext_len = len(compressed)
 7. 加密內容：ciphertext = AES-256-GCM-Encrypt(key=DEK, nonce=nonce, aad=header, pt=compressed)
 8. file = header || ciphertext || trailer
@@ -539,54 +544,71 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
 
 **狀態機**
 
-標頭 `generations` 的組合決定狀態；每次轉換都是一次標頭寫入（含 MAC），轉換後的狀態可由任何裝置從標頭直接判讀，重啟後據此續行。
+狀態由「active 世代 a」與「未清除的非 active 世代集合」描述。取消過的輪替會留下一個 `retired` 世代，它不會在取消時清除，而是等**下一次前進的輪替 settle 時**連同其他較低世代一起清除。這樣每個轉換的 MAC 世代都是該標頭中最高的未清除世代，不會出現「要用剛清除的世代簽」的矛盾。
 
 ```
-single(g)                          generations 中未清除者 = [{g, active}]；n = max_gen + 1
+stable(a; R)            未清除 = {a: active} ∪ {r: retired | r ∈ R}；R 可為空。m = max_gen + 1
    │ 提交點 A（op 開始，direction = forward）
    ▼
-migrating(g→n)                     [{g, retiring}, {n, active}]
-   │ 所有 head 皆為 n              │ 使用者取消（僅 reason == routine 允許）→ op.direction = revert
+migrating(a→m; R)       {a: retiring, m: active} ∪ R
+   │ 所有 head 皆為 m              │ 使用者取消（僅 reason == routine）→ op.direction = revert
    ▼                              ▼
-retired(g, n)                     reverting(n→g)       [{g, active}, {n, reverting}]
-   [{g, retired}, {n, active}]     │ 所有 head 皆為 g
+settled(m; R ∪ {a})     reverting(m→a; R)        {a: active, m: reverting} ∪ R
+   {a: retired, m: active} ∪ R     │ 所有 head 皆為 a
    │ 所有裝置確認 op(forward)       ▼
-   ▼                              retired_back(n, g)   [{g, active}, {n, retired}]
-single(n)：g 標記 purged           │ 所有裝置確認 op(revert)
-                                   ▼
-                                  single(g)：n 標記 purged；max_gen 仍為 n
+   ▼                              stable(a; R ∪ {m})      {a: active, m: retired} ∪ R    ← m 保留，不清除
+stable(m; ∅)
+   R ∪ {a} 全部標記 purged
 ```
 
-**轉換授權表**（哪把 VK 可以簽出哪個轉換；MAC 不符即 HEADER_TRANSITION_DENIED）
+- 任何標頭中「最高的未清除世代」記為 `top`。在 stable(a; R) 中 top = max(a, R)；取消後 top = m > a。
+- 正常情況 R 為空；只有「取消過且尚未再做一次前進輪替」時 R 非空。R 中的世代仍可解密（包裝保留、隨密碼變更重新包裝），不用於寫入。
 
-| 父標頭狀態 | 允許的子標頭狀態 | MAC 必須使用的世代 |
-|------|------|------|
-| single(g) | single(g)（同狀態更新：改密碼、復原金鑰、命名、裝置、確認） | g |
-| single(g) | migrating(g→n)，n = 父的 max_gen + 1 | n |
-| migrating(g→n) | migrating(g→n)（同狀態更新、遷移進度） | n |
-| migrating(g→n) | retired(g, n) | n |
-| migrating(g→n) | reverting(n→g)，且該 op 的 reason == routine | n |
-| retired(g, n) | retired(g, n)（同狀態更新、確認） | n |
-| retired(g, n) | single(n)，g 轉為 purged | n |
-| reverting(n→g) | reverting(n→g)（同狀態更新） | n |
-| reverting(n→g) | retired_back(n, g) | n |
-| retired_back(n, g) | retired_back(n, g)（同狀態更新、確認） | n |
-| retired_back(n, g) | single(g)，n 轉為 purged | n |
+**轉換授權表**（每個轉換的子標頭 MAC 必須使用的世代；不符即 HEADER_TRANSITION_DENIED）
 
-- 規則一：任何標頭的 `mac.gen` 必須等於其中最高的未清除世代；表中「MAC 必須使用的世代」與此一致。
-- 規則二：只有表中列出的轉換合法；`max_gen` 只能不變或 +1（且只在 single → migrating 時 +1）；`generations[]` 條目只能新增或改狀態，不能移除。
-- 規則三：reason 非 `routine` 的輪替（主密碼、復原金鑰、不確定）**沒有** reverting 轉換，只能前進到 single(n)。
-- 效果：持有舊世代 VK_g 的攻擊者在裝置信任任何含 n 的標頭之後，無法簽出任何合法轉換（全部需要 VK_n），也無法偽造 single(g) 子標頭（不在表中）。他能做的只剩在 single(g) 狀態下的同狀態更新，而該狀態本身就是輪替要離開的狀態。
+| 父標頭狀態 | 允許的子標頭狀態 | 子標頭 MAC 世代 | 說明 |
+|------|------|------|------|
+| stable(a; R) | stable(a; R)（同狀態更新：改密碼、復原金鑰、命名、裝置） | top = max(a, R) | |
+| stable(a; R) | migrating(a→m; R)，m = 父的 max_gen + 1 | m | m 成為新的 top |
+| migrating(a→m; R) | migrating(a→m; R)（同狀態更新、遷移進度） | m | |
+| migrating(a→m; R) | settled(m; R ∪ {a}) | m | 所有 head 皆為 m |
+| migrating(a→m; R) | reverting(m→a; R)，且該 op 的 reason == routine | m | |
+| settled(m; R') | settled(m; R')（同狀態更新、交接確認） | m | |
+| settled(m; R') | stable(m; ∅)，R' 全部轉為 purged | m | 需所有裝置的 forward 確認 |
+| reverting(m→a; R) | reverting(m→a; R)（同狀態更新） | m | |
+| reverting(m→a; R) | stable(a; R ∪ {m}) | m | 所有 head 皆為 a；m 保留為 retired，不需交接確認 |
+
+- 規則一：任何標頭的 `mac.gen` 必須等於其 top（最高未清除世代）。表中每一列的「子標頭 MAC 世代」都等於子標頭的 top，兩者永不衝突。
+- 規則二：只有表中列出的轉換合法；`max_gen` 只能不變或 +1（且只在 stable → migrating 時 +1）；`generations[]` 條目只能新增或改狀態，不能移除；清除只發生在 settled → stable 這一個轉換，且只清除低於 m 的世代。
+- 規則三：reason 非 `routine` 的輪替（主密碼、復原金鑰、不確定）**沒有** reverting 轉換，只能前進到 stable(m; ∅)。
+- 推論：沿任何合法路徑，top 與 max_gen 都單調不減。持有舊世代 VK_g 的攻擊者，在裝置信任任何 top > g 的標頭之後，無法簽出任何合法的子標頭（全部需要 VK_top）。他能做的只剩在 top == g 的狀態下做同狀態更新，而那正是輪替要離開的狀態。
 - 標頭包裝的 AAD 含世代號，舊世代的 VK 包裝密文無法被重新標記為新世代。
+
+**授權的錨點**：裝置驗證 head 的 MAC 時，所用的 VK_top 必須是**用本機的主密碼（或復原金鑰）從 head 自己的包裝解出來的**。攻擊者沒有 PK 就無法為任何 VK 做出可被解開的包裝，因此無法製造任何 top 世代不是由密碼持有者建立的標頭。轉換表限制的是「狀態能往哪裡走」，包裝限制的是「誰能建立新世代」，兩者合起來才構成授權；缺一不可。
+
+**路徑驗證**（取代「head 相對於信任點必須是相鄰轉換」）：裝置的標頭信任點 P 到 head H 之間可能隔著多個標頭修訂（離線期間另一台完成整個輪替是正常情況）。驗證方式：
+
+```
+1. 以 7.4 的雜湊鏈由 H 回溯到 P，得到路徑 P = H_0 → H_1 → … → H_k = H（每一步 parent_hash 已驗證）
+2. 對每一步 H_i → H_{i+1}：以明文狀態檢查轉換在授權表內，且 H_{i+1}.mac.gen == H_{i+1}.top
+3. MAC 驗證：
+   H（head）：必須驗證，金鑰 VK_top(H) 由本機密碼從 H 的包裝解出
+   中間標頭 H_i：若其 mac.gen 世代在 H 中仍未清除 → 以同一把 VK（世代不變）驗證；
+                 若已清除 → 無法驗證 MAC，接受雜湊鏈與明文轉換檢查的結果
+4. 任一步失敗 → HEADER_TRANSITION_DENIED（轉換）或 HEADER_MAC_INVALID（MAC）
+```
+
+- 中間標頭的 MAC 無法驗證時為何安全：路徑上每個標頭的完整 bytes 都由其子的 `parent_hash` 認證，最終由 H 的 MAC 認證；攻擊者若要插入或改動中間標頭，必須同時改動 H，而 H 的 MAC 需要 VK_top(H)，攻擊者沒有。中間標頭的 MAC 驗證只是多一層防禦，不是授權的依據。
+- 新裝置沒有 P 時只做第 2 步的內部一致性與第 3 步的 head 驗證（FR-SYNC-11 的限制適用）。
 
 - **寫入世代**永遠是 `active` 那一個；任何裝置寫入前先讀標頭 head 並驗證 MAC，只用 active 世代的 VK（FR-SYNC-14）。
 - `retiring` / `reverting` / `retired` 世代的 VK 仍留在標頭中（以目前憑證包裝），任何解鎖的裝置都能解出，因此這些世代的修訂仍可讀。
 - **遷移**（migrating 或 reverting 期間）：列出每個 file_id 的 head（經 7.4 驗證）；對世代不是 active 的 head，解密後以 active 世代重新加密為新修訂（parent 指向該 head）。可中斷；重啟後重新列出，只處理仍未遷移者。遷移可由任何已解鎖的裝置分擔。
-- **從 migrating 到 retired**：確認所有 file_id 的 head 都是 g+1 且無分支後寫入標頭。此時 g 仍可讀，所以 B1 與 B2 之間的時間差不再有害。
-- **延遲上傳與舊裝置重新加入**：任何時刻若出現世代為非 active 的新 head（例如離線裝置在輪替前就寫好、現在才上傳），同步到它的裝置將其視為待遷移，重新加密為 active 世代的新修訂（parent 指向它）。離線裝置自己重新上線時的規則：先同步標頭 → 發現 active 世代與本機 pending 修訂的世代不同 → 以本機快取的舊標頭與舊憑證（若已更換則提示輸入舊主密碼）解出舊世代 VK，解密 pending 修訂，再以 active 世代重新加密後上傳。若舊世代已被清除（single 狀態）而本機沒有舊標頭快取，pending 修訂無法上傳，回報 `STALE_GENERATION_PENDING` 並讓使用者檢視其明文（仍可用舊憑證從本機快取解出）。
-- **所有裝置確認（交接確認）**：確認紀錄綁定這一次輪替操作，存於標頭 `rekey_ops[].acks[]`：`{ device_id, direction, acked_header_rev, pending_cleared: true, at }`。裝置只有在以下全部成立時才寫入確認：已讀取並驗證含此 op、處於 `retired` 或 `retired_back` 狀態的標頭；本機所有 pending 修訂都已以 active 世代重新加密並上傳成功；本機已切換寫入世代為 active（不再有舊世代寫入）。從 `retired` 進入 `single(n)` 的條件：`devices[]` 中每台裝置都有此 `op_id`、`direction == forward` 的確認；從 `retired_back` 進入 `single(g)` 的條件：每台裝置都有此 `op_id`、`direction == revert` 的確認（forward 的確認不算）。使用者可在設定畫面明確移除未回報的裝置（介面須警告該裝置上的 pending 修訂將無法上傳）。工具不以時間、也不以單一世代數字作為自動條件。
-- **清除舊世代**：進入 `single` 後，舊世代條目改為 `purged`，其 VK 包裝從標頭移除。舊世代的修訂檔案本身在第一版不刪除（FR-SYNC-12），它們仍是雜湊鏈的一部分；因為祖先只以雜湊做關係驗證（7.4），不需要解密，清除舊 VK 不影響任何裝置（含全新裝置）的同步與驗證。若舊憑證外洩，攻擊者能解開的只有輪替前已存在的內容，與執行輪替前的狀態相同。
-- **取消**：只能從 `migrating` 進入 `reverting`，且只有 reason 為 `routine` 的輪替可以取消；兩把金鑰都保留；反向遷移完成並確認所有 head 都是 g 之後，才進入 `retired_back(n, g)`，再依 revert 方向的裝置確認回到 `single(g)`，n 標記 `purged`。取消後再次輪替，目標世代為 `max_gen + 1`（即 n+1），n 永不重用。任何時刻中斷都停留在可判讀的狀態。
+- **從 migrating 到 settled**：確認所有 file_id 的 head 都是 m 且無分支後寫入標頭。此時 a 仍可讀，所以「確認」與「清除」之間的時間差不再有害。
+- **延遲上傳與舊裝置重新加入**：任何時刻若出現世代為非 active 的新 head（例如離線裝置在輪替前就寫好、現在才上傳），同步到它的裝置將其視為待遷移，重新加密為 active 世代的新修訂（parent 指向它）。離線裝置自己重新上線時的規則：先同步標頭 → 發現 active 世代與本機 pending 修訂的世代不同 → 以本機快取的舊標頭與舊憑證（若已更換則提示輸入舊主密碼）解出舊世代 VK，解密 pending 修訂，再以 active 世代重新加密後上傳。若舊世代已被清除（stable(m; ∅) 狀態）而本機沒有舊標頭快取，pending 修訂無法上傳，回報 `STALE_GENERATION_PENDING` 並讓使用者檢視其明文（仍可用舊憑證從本機快取解出）。
+- **所有裝置確認（交接確認）**：確認紀錄綁定這一次輪替操作，存於標頭 `rekey_ops[].acks[]`：`{ device_id, direction, acked_header_rev, pending_cleared: true, at }`。裝置只有在以下全部成立時才寫入確認：已讀取並驗證含此 op、處於 `settled` 狀態的標頭；本機所有 pending 修訂都已以 active 世代重新加密並上傳成功；本機已切換寫入世代為 active（不再有舊世代寫入）。從 `settled(m; R')` 進入 `stable(m; ∅)` 的條件：`devices[]` 中每台裝置都有此 `op_id`、`direction == forward` 的確認。取消（reverting → stable）不清除任何世代，因此不需要交接確認；被取消的世代 m 之後會在下一次前進輪替的 settled → stable 時清除，而那一次的確認綁定的是那一次的 op，其「pending 已清」條件自然涵蓋任何殘留的 m 世代寫入。使用者可在設定畫面明確移除未回報的裝置（介面須警告該裝置上的 pending 修訂將無法上傳）。工具不以時間、也不以單一世代數字作為自動條件。
+- **清除舊世代**：只在 settled → stable 發生；所有低於 m 的未清除世代（含先前取消留下的 retired 世代）條目改為 `purged`，其 VK 包裝從標頭移除。舊世代的修訂檔案本身在第一版不刪除（FR-SYNC-12），它們仍是雜湊鏈的一部分；因為祖先只以雜湊做關係驗證（7.4），不需要解密，清除舊 VK 不影響任何裝置（含全新裝置）的同步與驗證。若舊憑證外洩，攻擊者能解開的只有輪替前已存在的內容，與執行輪替前的狀態相同。
+- **取消**：只能從 `migrating` 進入 `reverting`，且只有 reason 為 `routine` 的輪替可以取消；兩把金鑰都保留；反向遷移完成並確認所有 head 都是 a 之後，進入 `stable(a; R ∪ {m})`：m 以 `retired` 保留，**不清除**。取消後再次輪替，目標世代為 `max_gen + 1`（即 m+1），m 永不重用；該次輪替 settle 時 m 與 a 一併清除。任何時刻中斷都停留在可判讀的狀態。第一版不提供「取消後單獨清除 m」的操作。
 - **憑證變更與輪替的順序**：若輪替時同時更換主密碼或復原金鑰，新憑證在提交點 A 的標頭中即對所有未清除世代生效（舊世代的 VK 也改以新憑證重新包裝）。**這不代表舊憑證失效**：保留在 Drive 上的舊標頭修訂仍含以舊憑證包裝的舊世代 VK，舊憑證仍可解開舊標頭與所有舊世代密文。新憑證達成的是：提交點 A 之後的所有新修訂、新世代 VK 與新標頭，舊憑證都無法解開。
 - 遷移期間若標頭出現分支（例如另一台裝置同時改密碼），遷移暫停並要求先解決標頭衝突。
 
@@ -837,7 +859,14 @@ Windows 對應路徑為 `%APPDATA%\hsm\` 與 `%LOCALAPPDATA%\hsm\cache\`。
 
 因此只有 head 需要內容驗證；head 以下的整條祖先鏈都只需關係驗證。清除舊世代 VK 後，任何裝置（含全新裝置）仍能驗證完整歷史關係。
 
-**信任的來源**：appProperties（`hsm.file_id`、`hsm.rev`、`hsm.parent_rev`、`hsm.gen`）只用來**找候選檔案與安排下載順序**，不參與任何判定。本機保有「已驗證修訂登錄」`verified_revs`（每個 file_id：rev → {hash, parent_rev, parent_hash, merge_parents, generation, verified_by: content | relation}），跨次同步累積。
+**信任的來源**：appProperties（`hsm.file_id`、`hsm.rev`、`hsm.parent_rev`、`hsm.gen`）只用來**找候選檔案與安排下載順序**，不參與任何判定。本機保有兩個分開的集合：
+
+| 集合 | 內容 | 生命週期 |
+|------|------|------|
+| `verified_revs`（曾驗證的歷史） | 每個 file_id：rev → {hash, parent_rev, parent_hash, 合併父, generation, verified_by: content \| relation, drive_file_id} | 跨次同步累積，只增不減；用於免重複下載與離線復原 |
+| `remote_present`（本次遠端存在） | 本次 list 回傳、且確認與登錄內容一致的 rev 集合 | 每次同步重建，不保留 |
+
+`remote_present` 的建立：對 list 回傳的每個候選，若其 rev 已在 `verified_revs` 且 Drive 回報的 `sha256Checksum`（檔案 metadata 欄位）等於登錄的 hash → 視為存在；不等或 Drive 未提供 → 重新下載驗證。Drive 的校驗欄位只用來省下載，不作為完整性依據。**head 與回滾判定只在 `verified_revs ∩ remote_present` 上進行**；本機登錄中有、遠端沒有的修訂，不能讓遠端看起來仍然完整。
 
 **同步一個邏輯檔案（file_id）**：
 
@@ -857,13 +886,22 @@ Windows 對應路徑為 `%APPDATA%\hsm\` 與 `%LOCALAPPDATA%\hsm\cache\`。
      父不在候選中也不在 verified_revs → MISSING_PARENT（獨立錯誤，與 head 數量無關）
 5. 仍未驗證的候選：既無法解密、也沒有任何已驗證修訂以它為父 → 捨棄，記錄 UNVERIFIED_CANDIDATE
    （它可能是攻擊者的假檔案，也可能是離線裝置以已清除世代上傳的修訂；兩者都不能影響 head 判定）
-6. head 判定（只看 verified_revs）：
-   head = 已驗證修訂中，沒有任何**已驗證**修訂以它為父（parent_rev 或合併父）者
+6. 遠端存在集合：S = verified_revs ∩ remote_present（見上表）。
+   C 為空且本機有此檔案的快取 → REMOTE_DELETED：該檔案在 Drive 已被刪除，標記 missing，提供「從本機快取重新上傳」（7.5）
+   T 非空且 rev_T ∉ S → 信任點已從遠端消失 → ROLLBACK_SUSPECTED（遠端歷史被移除），停止寫入，待使用者確認；
+     使用者確認後可選擇「以本機快取重新上傳信任分支」或「接受遠端現狀並重設信任點」
+7. head 判定（只看 S）：
+   head = S 中沒有任何 S 內的修訂以它為父（parent_rev 或合併父）者
    → 未驗證候選即使宣稱以某修訂為父，也不能取消該修訂的 head 身分
-7. 回滾檢查：T 非空時，每個 head 必須能沿已驗證的父參照走到 rev_T，且 verified_revs[rev_T].hash == hash_T；
-   任何 head 做不到 → ROLLBACK_SUSPECTED，停止對此檔案的寫入，待使用者確認
-8. |head| == 0 且 C 非空 → CORRUPTED_CHAIN
-   |head| == 0 且 C 為空但本機有快取 → 該檔案在 Drive 被刪除，標記 missing（7.5）
+   → 本機登錄中有、遠端已不存在的修訂，不參與判定
+8. 回滾與分支的區分（T 非空時）：
+   D = 能沿 S 內已驗證的父參照走到 rev_T 的 head（信任點的後代，含 rev_T 自己是 head 的情況）
+   D 為空 → 沒有任何 head 延續本機信任的歷史 → ROLLBACK_SUSPECTED，停止寫入，待使用者確認
+   D 非空 → 本機信任的分支仍在遠端。其他不屬於 D 的 head：
+     與 rev_T 有共同祖先（沿父參照可走到 rev_T 的某個祖先）→ **合法的兄弟分支**（另一台裝置以較早的
+       parent 離線寫入），進入第 10 步的分支處理，不視為回滾
+     與 rev_T 的鏈完全不相交（沒有共同祖先）→ FOREIGN_CHAIN，捨棄並警告
+   |head| == 0 且 C 非空 → CORRUPTED_CHAIN
 9. |head| == 1：採用；更新本機快取與信任點 T = {rev, hash}
    （head 必須是 verified_by: content；若唯一的 head 只有關係驗證，表示它的世代已清除而沒有後代 → STALE_GENERATION_HEAD，需人工處理）
 10. |head| > 1：分支
@@ -878,7 +916,15 @@ Windows 對應路徑為 `%APPDATA%\hsm\` 與 `%LOCALAPPDATA%\hsm\cache\`。
 - 解決衝突的修訂把所有 head 列入 trailer（含雜湊），之後它們都不再是 head。
 - 離線寫入累積多個本機修訂時，上線後依序上傳（每個的 parent 是前一個），只會形成一條鏈。
 - 標頭也是邏輯檔案，同樣走此流程；差別是內容驗證方式為 MAC（8.1）而非 AES-GCM，head 另需通過 8.1 的轉換授權檢查，且舊標頭（以已清除世代簽 MAC）同樣只需關係驗證。
-- 成本：每次同步下載「verified_revs 之外」的所有新修訂，通常是零到數個小檔案；第一次同步或全新裝置下載全部歷史（第一版不清理，見 FR-SYNC-12）。
+- 成本：每次同步下載「verified_revs 之外」的所有新修訂，通常是零到數個小檔案；已登錄者只比對 Drive 回報的校驗值；第一次同步或全新裝置下載全部歷史（第一版不清理，見 FR-SYNC-12）。
+
+**推演：正常離線衝突不是回滾（審閱案例）**
+
+兩台裝置原本都信任 R。甲寫出 A（信任點變為 A）；乙離線寫出 B（parent 仍為 R）。甲同步：S = {R, A, B}，head = {A, B}；第 8 步 D = {A}（A 是信任點本身），非空；B 不在 D 中，但 B 的父 R 是 A 的祖先 → 兄弟分支 → 第 10 步進入衝突處理。沒有回滾警告。
+
+**推演：遠端刪除被本機登錄掩蓋（審閱案例）**
+
+本機登錄有 R、A，信任點 A；Drive 上 A 被刪除。list 只回傳 R → remote_present = {R}，S = {R}；第 6 步 rev_T = A ∉ S → ROLLBACK_SUSPECTED（遠端歷史被移除），並提供從本機快取重新上傳 A。若 Drive 上整個檔案被清空，C 為空 → REMOTE_DELETED。本機登錄中的 A 不會讓程式誤以為遠端仍有 head。
 
 **推演：假子修訂隱藏撤銷分支（審閱案例）**
 
@@ -891,7 +937,7 @@ T 分出合法修訂 A（active）與 B（revoked）；攻擊者加入假修訂 
 | HTTP 403 `rateLimitExceeded` / 429 | 指數退避：1s、2s、4s、8s、16s，最多 5 次 |
 | HTTP 5xx | 同上 |
 | HTTP 401 | 以 refresh token 更新 access token 後重試一次；仍失敗則要求重新授權 |
-| HTTP 404 或 list 為空（檔案被使用者刪除） | 索引中標記該 Item 為 `missing`，`status` 顯示並提供「從本機快取重新上傳」或「從備份還原」 |
+| list 為空而本機有快取（檔案被使用者刪除） | `REMOTE_DELETED`：索引中標記該 Item 為 `missing`，`status` 顯示並提供「從本機快取重新上傳」或「從備份還原」 |
 | 網路不可用 | 立即改為離線模式，寫入操作保留 pending |
 | Drive 空間不足 | 回報錯誤，保留 pending |
 
@@ -954,18 +1000,18 @@ JSON，明文可讀（不含機密），整份以 HMAC 保護。標頭也是一�
 }
 ```
 
-- `generations[].status` ∈ `active` / `retiring` / `retired` / `reverting` / `purged`；`purged` 條目沒有 `wrappings` 與 `vk_check`，但條目本身永不移除。
+- `generations[].status` ∈ `active` / `retiring` / `retired` / `reverting` / `purged`；`purged` 條目沒有 `wrappings` 與 `vk_check`，但條目本身永不移除。`retired` 世代可能不只一個（每次取消留下一個），全部在下一次 settled → stable 時清除。
 - `rekey_ops` 上例為示意；`single` 狀態下最後一個 op 已完成。`acks` 的語意見 5.1.6。
 
 **完整性**
 
 - `mac.value = HMAC-SHA256(HK_gen, canonical(header without "mac"))`，其中 `HK_gen = HKDF-SHA256(ikm=VK_gen, salt=vault_id, info="hsm-header-mac-v1", len=32)`，`canonical` 為 RFC 8785（JSON Canonicalization Scheme）序列化。
 - `mac.gen` 必須等於此標頭中最高的未清除世代（不是由標頭自行宣告任意世代）；讀取時用該世代的 VK 驗證（任何解鎖的裝置都能以密碼包裝解出該世代 VK）。
-- **轉換授權**：標頭 head 相對於本機標頭信任點的狀態轉換必須在 5.1.6 的授權表內，MAC 世代必須等於表中規定者，`max_gen` 單調，`generations[]` 只增不減；任一不符 → HEADER_TRANSITION_DENIED。新裝置沒有信任點時只檢查內部一致性（規則一、二），並以該 head 建立信任點（FR-SYNC-11 的限制在此適用）。
+- **轉換授權**：從本機標頭信任點到 head 的路徑上，每一個相鄰轉換都必須在 5.1.6 的授權表內，每個標頭的 MAC 世代等於其 top，`max_gen` 與 top 單調不減，`generations[]` 只增不減；任一不符 → HEADER_TRANSITION_DENIED。head 的 MAC 金鑰必須由本機密碼從 head 自己的包裝解出（5.1.6「授權的錨點」）。新裝置沒有信任點時只檢查內部一致性，並以該 head 建立信任點（FR-SYNC-11 的限制在此適用）。
 - 舊標頭修訂（以已清除世代簽 MAC）無法再做 MAC 驗證，但可由子標頭的 `parent_hash` 做關係驗證（7.4）。
 - 讀取順序（FR-INIT-12）：解析 JSON（大小上限 1 MiB）→ 檢查 `format` 與每個 `kdf` 的參數上限 → 以密碼或復原金鑰解開 `mac.gen` 世代的 VK → `vk_check` → **驗證 MAC** → 此後才可採用 `rev`、`parent_rev`、`parent_hash`、`generations[].status`、`naming`、`devices`。MAC 失敗 → HEADER_MAC_INVALID，該修訂視同不存在。
 - 標頭的雜湊鏈驗證同 7.4：新 head 必須沿 `parent_rev` / `parent_hash` 走到本機的標頭信任點。
-- 未清除世代的合法組合只有 5.1.6 狀態機列出的五種；其他組合視為 CORRUPTED。
+- 未清除世代的合法組合只有 5.1.6 狀態機列出的四種形態（stable / migrating / settled / reverting，各自可附帶零或多個 `retired` 世代）；其他組合視為 CORRUPTED。
 - `devices[].last_seen_header_rev` 由各裝置每次同步時更新（僅供顯示）；輪替的交接確認存於 `rekey_ops[].acks`（5.1.6），不以 `devices` 的欄位判定。
 - `wrappings.password` 與 `wrappings.recovery` 包裝的是同一把 VK，AAD 為 `"hsm-vk-wrap-v1" || vault_id || gen`。
 - `vk_check.ciphertext` 為字串 `"hsm-vk-check-v1"` 以 VK 加密的結果，AAD 為 `vault_id || gen`。
@@ -993,7 +1039,7 @@ JSON，明文可讀（不含機密），整份以 HMAC 保護。標頭也是一�
 | 166 | 12 | nonce | 內容加密用 |
 | 178 | 4 | plaintext_len | 壓縮後明文長度（= ciphertext 長度 − 16） |
 | 182 | 1 | merge_count | trailer 中合併父的數量（0–255），一般寫入為 0 |
-| 183 | 32 | trailer_hash | SHA-256(trailer)；merge_count = 0 時為全零 |
+| 183 | 32 | trailer_hash | SHA-256(trailer bytes)，**沒有特例**：merge_count = 0 時為 SHA-256 的空輸入值 `e3b0c442…b855` |
 | 215 | plaintext_len + 16 | ciphertext | zstd 壓縮內容的 AES-256-GCM 密文 + 16 bytes tag |
 | 215 + plaintext_len + 16 | merge_count × 48 | trailer | 明文；每筆 = 合併父 rev（16 bytes）+ 該父整個檔案的 SHA-256（32 bytes） |
 
@@ -1104,7 +1150,7 @@ JSON，明文可讀（不含機密），整份以 HMAC 保護。標頭也是一�
 5     4           outer_len（big-endian；硬性上限 1 MiB，超過即拒絕，未檢查前不配置、不解析）
 9     outer_len   outer_json（UTF-8 明文；解析時限制巢狀深度 ≤ 8）
 9+L   ...         inner：一個 8.2 格式的加密檔案，kind = 5，file_id = 固定 UUID，
-                  rev = 此備份的 UUID，parent_rev / parent_hash = 全零，merge_count = 0，generation = outer_json 中的 gen；
+                  rev = 此備份的 UUID，parent_rev / parent_hash = 全零，merge_count = 0，trailer_hash = SHA-256("")，generation = outer_json 中的 gen；
                   其 AAD = 215-byte 標頭 || SHA-256(outer_json bytes)（8.2、5.1.3 已納入此規則）
 ```
 
@@ -1198,7 +1244,7 @@ hsm vault change-password
 hsm vault recovery regenerate
 hsm vault recovery unlock          # 以復原金鑰解鎖並重設主密碼
 hsm vault rekey --reason password|recovery|unknown|routine [--new-recovery-key]   # 全面輪替（新世代）
-hsm vault rekey --status | --resume | --abort | --finalize   # 續行 / 取消（僅 routine 可，進入 reverting）/ 嘗試進入 single
+hsm vault rekey --status | --resume | --abort | --finalize   # 續行 / 取消（僅 routine 可，進入 reverting）/ 嘗試 settled → stable
 hsm vault rekey --ack                # 本裝置寫入此輪替操作的交接確認（pending 已清、已切換寫入世代）
 hsm vault devices list | remove <device_id>
 
@@ -1291,7 +1337,7 @@ hsm log [--since T] [--action A] [--item NAME] [--limit N]
 | 可靠性 | 任何時刻程序被中斷（Ctrl-C、斷電、斷線）都不得造成已確認寫入的資料遺失；寫入快取採「寫暫存檔再 rename」；Drive 上的資料從不就地覆寫；全面輪替在任一步中斷後重啟皆可續行或明確回復。 |
 | 相容性 | Linux x86_64 / arm64、macOS（Intel / Apple Silicon）、Windows 10+。桌面應用程式以各平台原生安裝檔發布（`.dmg`、`.msi`、`.AppImage` / `.deb`）。 |
 | 互通性 | 匯出的 OpenSSH 金鑰需能被 `ssh-keygen -y`、`ssh-add` 正確讀取；PEM 需能被 `openssl` 讀取。 |
-| 測試 | 加密層與檔案格式單元測試覆蓋率 ≥ 90%；金鑰匯入匯出與 OpenSSH / OpenSSL 做互通測試；下列**復原導向驗收測試**為 Phase 1a 的結束條件，比覆蓋率更優先：(a) 變更主密碼與全面輪替的每一個步驟之後強制中斷，重啟後 Vault 必須仍可用主密碼與復原金鑰開啟且資料完整；(b) 兩台模擬裝置離線各自修改同一 Item、同一 hosts、同時改密碼，上線後必須偵測分支且雙方資料皆保留；(c) 清空本機環境、不給 Google 授權，只用備份檔加主密碼或復原金鑰還原，所有 Item 與金鑰可讀；(d) 竄改檔案長度欄位、KDF 參數、parent_rev、標頭 MAC 保護的欄位與回滾整份資料，工具必須拒絕並給出對應錯誤碼；(e) 寫入私鑰與明文匯出時在 Windows 與 Unix 驗證檔案建立瞬間即為僅本人可讀；(f) 偽造中間修訂（合法 appProperties、偽造或替換的內容）使新 head 看似信任點的後代，必須被 HASH_MISMATCH 或 MISSING_PARENT 擋下；(g) 舊世代裝置在輪替進入 `retired` 之後才上傳延遲的修訂，資料必須被遷移且不遺失；(h) 取消輪替途中斷電，重啟後兩把金鑰皆可用且能續行或完成反向遷移；(i) 離線裝置在輪替完成並清除舊世代後重新連線，其 pending 修訂必須能以本機舊標頭快取與舊憑證解出並重新上傳；(j) 假子修訂隱藏撤銷分支：T 分出 active 與 revoked 兩個合法修訂，加入一個宣稱以 revoked 為父的無效檔案，同步後必須仍回報分支衝突；(k) 舊 VK 簽署降級標頭：以已清除或 retired 世代的 VK 製作 parent 指向目前信任標頭的 single(g) 標頭，必須被 HEADER_TRANSITION_DENIED 擋下；(l) 完成輪替、清除舊世代、再改一次主密碼後，全新電腦只用最新主密碼同步，必須能驗證完整歷史並採用最新資料；(m) 取消輪替時某台裝置尚未寫入 revert 方向的確認（即使它有 forward 確認或曾看過新世代），必須無法進入 single；(n) 取消後再次輪替，目標世代必須為歷來最大世代加一，且所有歷史修訂的世代號仍能唯一對應金鑰。同步引擎以本機資料夾儲存層做整合測試。 |
+| 測試 | 加密層與檔案格式單元測試覆蓋率 ≥ 90%；金鑰匯入匯出與 OpenSSH / OpenSSL 做互通測試；下列**復原導向驗收測試**為 Phase 1a 的結束條件，比覆蓋率更優先：(a) 變更主密碼與全面輪替的每一個步驟之後強制中斷，重啟後 Vault 必須仍可用主密碼與復原金鑰開啟且資料完整；(b) 兩台模擬裝置離線各自修改同一 Item、同一 hosts、同時改密碼，上線後必須偵測分支且雙方資料皆保留；(c) 清空本機環境、不給 Google 授權，只用備份檔加主密碼或復原金鑰還原，所有 Item 與金鑰可讀；(d) 竄改檔案長度欄位、KDF 參數、parent_rev、標頭 MAC 保護的欄位與回滾整份資料，工具必須拒絕並給出對應錯誤碼；(e) 寫入私鑰與明文匯出時在 Windows 與 Unix 驗證檔案建立瞬間即為僅本人可讀；(f) 偽造中間修訂（合法 appProperties、偽造或替換的內容）使新 head 看似信任點的後代，必須被 HASH_MISMATCH 或 MISSING_PARENT 擋下；(g) 舊世代裝置在輪替進入 `settled` 之後才上傳延遲的修訂，資料必須被遷移且不遺失；(h) 取消輪替途中斷電，重啟後兩把金鑰皆可用且能續行或完成反向遷移；(i) 離線裝置在輪替完成並清除舊世代後重新連線，其 pending 修訂必須能以本機舊標頭快取與舊憑證解出並重新上傳；(j) 假子修訂隱藏撤銷分支：T 分出 active 與 revoked 兩個合法修訂，加入一個宣稱以 revoked 為父的無效檔案，同步後必須仍回報分支衝突；(k) 舊 VK 簽署降級標頭：以已清除或 retired 世代的 VK 製作 parent 指向目前信任標頭、top 較低的 stable 標頭，必須被 HEADER_TRANSITION_DENIED 或 HEADER_MAC_INVALID 擋下；(l) 完成輪替、清除舊世代、再改一次主密碼後，全新電腦只用最新主密碼同步，必須能驗證完整歷史並採用最新資料；(m) 前進輪替進入 settled 後，某台裝置尚未寫入此 op 的 forward 確認（即使它曾看過新世代，或對先前被取消的 op 寫過確認），必須無法進入 stable(m; ∅) 清除舊世代；(n) 取消後再次輪替，目標世代必須為歷來最大世代加一，且所有歷史修訂的世代號仍能唯一對應金鑰；(o) 一般非合併檔案與備份檔寫入後立即解密成功（含空 trailer 雜湊）；(p) 取消輪替完成後鎖定、重啟，並以全新裝置用目前主密碼解鎖與同步，標頭 MAC 與狀態皆驗證通過；(q) 離線裝置跨過另一台完成的完整輪替（stable → migrating → settled → stable）後重新同步，路徑驗證通過且資料可用；(r) 兩台裝置以相同 parent 各自寫入後，必須進入衝突處理而不是回滾警告；(s) 保留本機快取、在 Drive 刪除某個修訂或整個檔案，同步必須回報 REMOTE_DELETED 或 ROLLBACK_SUSPECTED 並能從本機快取重新上傳。同步引擎以本機資料夾儲存層做整合測試。 |
 | 相依性 | 不依賴專案方任何線上服務；除 Google Drive API 外不連線其他主機（含不做自動更新檢查，除非使用者明確啟用）。 |
 | 可觀測性 | `--verbose` 輸出 Drive API 呼叫摘要（方法、檔案 ID、狀態碼），永不輸出內容或 token。 |
 | 國際化 | CLI 訊息繁體中文與英文雙語，預設依系統語系，`HSM_LANG` 可覆寫。 |
@@ -1326,12 +1372,12 @@ hsm log [--since T] [--action A] [--item NAME] [--limit N]
 | 階段 | 目標 | 主要交付 | 對應需求 |
 |------|------|----------|----------|
 | **Phase 0：確認** | 規格審閱、技術選型定案、建立 Google Cloud OAuth client、repo 骨架 | 本文件 1.0、CI 流程、專案結構、儲存層介面定義 | 第 13 章全部 |
-| **Phase 1a：核心與復原** | Core 程式庫在本機資料夾儲存層與 Google Drive 上通過全部復原導向驗收測試 | 三層金鑰結構、標頭 MAC 與雜湊鏈、8.2 檔案格式與硬性上限、不可覆寫修訂與經驗證的分支偵測、回滾防護、衝突合併修訂、變更主密碼、復原金鑰、全面輪替狀態機（含取消、延遲上傳、舊裝置重新加入）、可獨立解鎖的備份與還原、Google 授權與資料夾建立、命名規則、帳密 / 通用 / 金鑰 / 憑證 / hosts 的資料模型與讀寫、金鑰產生 / 匯入 / 匯出（含每版本狀態與部署狀態）、Chrome CSV 匯入引擎、操作紀錄、Windows ACL 與 Unix 權限、驗收測試 (a)–(n) | 5.1、5.3、8、4.5、4.6 的 P0 |
+| **Phase 1a：核心與復原** | Core 程式庫在本機資料夾儲存層與 Google Drive 上通過全部復原導向驗收測試 | 三層金鑰結構、標頭 MAC 與雜湊鏈、8.2 檔案格式與硬性上限、不可覆寫修訂與經驗證的分支偵測、回滾防護、衝突合併修訂、變更主密碼、復原金鑰、全面輪替狀態機（含取消、延遲上傳、舊裝置重新加入）、可獨立解鎖的備份與還原、Google 授權與資料夾建立、命名規則、帳密 / 通用 / 金鑰 / 憑證 / hosts 的資料模型與讀寫、金鑰產生 / 匯入 / 匯出（含每版本狀態與部署狀態）、Chrome CSV 匯入引擎、操作紀錄、Windows ACL 與 Unix 權限、驗收測試 (a)–(s) | 5.1、5.3、8、4.5、4.6 的 P0 |
 | **Phase 1b：桌面介面** | 桌面應用程式在單一裝置可完整使用，第二裝置可連接同步 | 9.1.1 所有 P0 畫面、5.6 GUI 強化、自動鎖定、剪貼簿清除、拖放匯入、衝突並排處理、伺服器端待處理清單 | 其餘 P0 |
 | **Phase 2：日常順手** | CLI、自動安裝、提醒、歷史清理設計 | CLI 與 agent（5.6）、`key install`、ssh-add、經驗證檢查點與歷史清理（FR-SYNC-19）、Chrome 設定檔直接讀取、其他密碼管理器匯入、TOTP、到期與輪替提醒、指紋反查、verify、垃圾桶、Drive 狀態、系統匣、操作紀錄畫面 | 所有 P1 |
 | **Phase 3：擴充** | 進階整合 | 多 Vault、背景同步、Host 掃描與公鑰推送、附件型 Item、PuTTY 匯出、其他 Chromium 瀏覽器匯入、全域快捷鍵、其他儲存後端、檔案大小填充 | P2 |
 
-每階段結束條件：對應需求的自動化測試全部通過、第 5 章安全檢查逐項確認、使用文件更新。Phase 1a 另外要求驗收測試 (a)–(n) 全數通過後才開始 Phase 1b。
+每階段結束條件：對應需求的自動化測試全部通過、第 5 章安全檢查逐項確認、使用文件更新。Phase 1a 另外要求驗收測試 (a)–(s) 全數通過後才開始 Phase 1b。
 
 ---
 
@@ -1358,6 +1404,7 @@ hsm log [--since T] [--action A] [--item NAME] [--limit N]
 | Q-17 | 全新裝置首次同步的回滾辨識：是否要在標頭加入「索引摘要雜湊 + 簽章」等機制 | 第一版不做，以人工比對緩解（FR-SYNC-11）；列為 Phase 3 研究 | FR-SYNC-10/11 |
 | Q-18 | 備份檔是否預設包含操作紀錄 | 預設不含（紀錄含 Item 名稱與時間，但不含機密值；由使用者決定） | FR-BAK-07 |
 | Q-19 | 全面輪替是否也要重新產生復原金鑰 | 預設詢問；懷疑復原金鑰外洩時必須 | 5.1.6 |
+| Q-20 | 取消輪替後被取消的世代以 retired 保留到下次前進輪替，是否需要「單獨清除」操作 | 第一版不提供；需要時再做一次前進輪替即可 | 5.1.6 |
 
 ---
 
@@ -1392,6 +1439,8 @@ hsm log [--since T] [--action A] [--item NAME] [--limit N]
 | 1 | `HEADER_TRANSITION_DENIED` | 標頭狀態轉換不在授權表內，或 MAC 世代不符該轉換 |
 | 1 | `UNVERIFIED_CANDIDATE` | 候選修訂既無法解密也沒有已驗證的子修訂，已捨棄（警告） |
 | 6 | `STALE_GENERATION_HEAD` | 唯一的 head 只有關係驗證（其世代已清除且無後代），需人工處理 |
+| 5 | `REMOTE_DELETED` | 本機有此檔案的快取，但 Drive 上已無任何修訂 |
+| 1 | `FOREIGN_CHAIN` | head 的鏈與本機信任的鏈沒有共同祖先，已捨棄 |
 | 6 | `CONFLICT_SENSITIVE_OP` | 衝突未解決，敏感操作被拒絕 |
 | 6 | `STALE_GENERATION_PENDING` | 本機 pending 修訂的世代已被清除，無法上傳 |
 | 1 | `UNSUPPORTED_FORMAT` | 檔案格式版本高於本程式支援 |
