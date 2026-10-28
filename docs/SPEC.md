@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |------|------|
-| 文件版本 | 0.4.0（草稿） |
+| 文件版本 | 0.5.0（草稿） |
 | 狀態 | 待審閱 |
 | 最後更新 | 2026-10-28 |
 | 適用範圍 | 全專案（單機桌面應用程式、CLI、Google Drive 儲存層） |
@@ -14,6 +14,8 @@
 > 0.3.0 版變更：明確定位為**單機桌面應用程式**（圖形介面為主、CLI 為輔），並加入**從 Chrome 匯入已儲存的網址與帳密**。
 >
 > 0.4.0 版變更：Drive 上的**資料夾名稱與所有檔案名稱皆由使用者自訂**，系統只提供預設值；檔案辨識改以 Drive 檔案屬性為準，不依賴檔名。
+>
+> 0.5.0 版變更：新增 5.1.1 至 5.1.6，逐步說明存放檔案的**加密與解密流程**、金鑰推導、主密碼變更與復原。
 
 ---
 
@@ -333,6 +335,163 @@ Holien Secrets Manager（以下簡稱 HSM，不與硬體安全模組混淆，見
 - **AAD**：包含檔案格式版本、Vault ID、檔案 ID、檔案類型，防止密文被搬移到其他檔案或其他 Vault。
 - **KEK 驗證**：Vault 標頭存一段以 KEK 加密的固定內容，解鎖時先解此段以判斷主密碼是否正確，不需下載任何 Item。
 - **復原金鑰**：若啟用，KEK 另以復原金鑰經 HKDF 推導的金鑰包裝後存於 Vault 標頭。變更主密碼不影響復原金鑰；重新產生復原金鑰則重新包裝。
+
+#### 5.1.1 金鑰推導（主密碼 → KEK）
+
+```
+輸入：master_password（使用者輸入，UTF-8，先做 NFKC 正規化）
+      header.kdf（algorithm, memory_kib, iterations, parallelism, salt）
+
+KEK = Argon2id(
+        password   = NFKC(master_password),
+        salt       = header.kdf.salt,          # 32 bytes，建立 Vault 時 CSPRNG 產生
+        memory     = header.kdf.memory_kib,    # 預設 262144（256 MB）
+        iterations = header.kdf.iterations,    # 預設 3
+        parallel   = header.kdf.parallelism,   # 預設 4
+        out_len    = 32)                       # 256-bit
+
+驗證：
+  plaintext = AES-256-GCM-Decrypt(
+                key   = KEK,
+                nonce = header.kek_check.nonce,
+                aad   = header.vault_id,
+                ct    = header.kek_check.ciphertext)
+  plaintext == "hsm-kek-check-v1" → 主密碼正確
+  解密失敗（GCM tag 不符）        → 主密碼錯誤；KEK 立即 zeroize
+```
+
+- NFKC 正規化避免同一密碼在不同作業系統輸入法下得到不同 bytes。
+- 推導只在解鎖時做一次；之後 KEK 保存在記憶體（GUI 程序內或 CLI agent），直到鎖定。
+- 主密碼輸入的緩衝區在推導完成後立即 zeroize。
+
+#### 5.1.2 加密一個檔案（寫入 / 上傳）
+
+適用於 `index`、`log`、`hosts`、每個 Item 檔案與加密備份檔。以 Item 檔案為例：
+
+```
+輸入：KEK、vault_id、file_id（Item 的 UUID；非 Item 檔案用固定 UUID）、
+      kind（1=index 2=item 3=log 4=hosts 5=backup）、plaintext_json
+
+1. 序列化：plaintext = JSON(plaintext_json)
+2. 壓縮：  compressed = zstd(plaintext)
+3. 產生 DEK：       DEK = CSPRNG(32 bytes)
+4. 包裝 DEK：       dek_nonce   = CSPRNG(12 bytes)
+                   wrapped_dek = AES-256-GCM-Encrypt(key=KEK, nonce=dek_nonce,
+                                   aad=vault_id || file_id, pt=DEK)   # 32 + 16 bytes
+5. 組標頭（偏移 0–108，見 8.2）：
+                   header = "HSM1" || kind || vault_id || file_id ||
+                            dek_nonce || wrapped_dek || nonce || plaintext_len
+                   其中 nonce = CSPRNG(12 bytes)、plaintext_len = len(compressed)
+6. 加密內容：       ciphertext = AES-256-GCM-Encrypt(key=DEK, nonce=nonce,
+                                   aad=header, pt=compressed)         # 含 16 bytes tag
+7. 檔案內容：       file = header || ciphertext
+8. 寫入本機快取（寫暫存檔 → fsync → rename），標記 pending
+9. 上傳到 Drive（檔名依命名規則，appProperties 標示 kind / vault_id / file_id）
+10. zeroize：DEK、plaintext、compressed
+```
+
+- **每次寫入都換新的 DEK 與 nonce**，不重用；同一 Item 的第 N 版與第 N+1 版是完全不同的密文。
+- AAD 綁定標頭，因此改動標頭任何一個 byte（例如把 `file_id` 換成別的 Item）會讓 GCM 驗證失敗。
+- Drive 只收到第 7 步的 bytes，整個流程不經過任何第三方。
+
+#### 5.1.3 解密一個檔案（讀取 / 下載）
+
+```
+輸入：KEK、file bytes（來自本機快取或 Drive 下載）、預期的 vault_id 與 file_id
+
+1. 檢查 magic == "HSM1"，否則 CORRUPTED
+2. 解析標頭；檢查 header.vault_id == 預期 vault_id、header.file_id == 預期 file_id，
+   否則 CORRUPTED（防止被替換成其他 Vault 或其他 Item 的檔案）
+3. 解包 DEK：DEK = AES-256-GCM-Decrypt(key=KEK, nonce=dek_nonce,
+                      aad=vault_id || file_id, ct=wrapped_dek)
+   失敗 → 主密碼不對應此檔案，或檔案被竄改 → CORRUPTED
+4. 解密內容：compressed = AES-256-GCM-Decrypt(key=DEK, nonce=nonce,
+                            aad=header, ct=ciphertext)
+   失敗 → 檔案被竄改或損毀 → CORRUPTED
+5. 檢查 len(compressed) == plaintext_len
+6. 解壓：plaintext = unzstd(compressed)，解壓上限 64 MB 防止壓縮炸彈
+7. 反序列化 JSON，交給上層使用
+8. 使用完畢 zeroize：DEK、compressed、plaintext（含其中的機密欄位）
+```
+
+- 解密完全在本機記憶體進行，明文不寫入磁碟（匯出私鑰等使用者明確要求的動作除外）。
+- 任何一步失敗都不會回傳部分內容。
+
+#### 5.1.4 各類檔案的加解密時機
+
+| 檔案 | 解密時機 | 加密（重寫）時機 |
+|------|----------|------------------|
+| 標頭 `header` | 解鎖時讀取 KDF 參數與 `kek_check`；本身大部分為明文 | 建立、變更主密碼、更新復原金鑰、修改命名規則 |
+| 索引 `index` | 解鎖後第一次列表時，以及每次同步偵測到 Drive 修訂變更時 | 任何 Item 新增、改名、改標籤、狀態變更後整份重寫 |
+| Item 檔案 | 使用者開啟該 Item 詳細頁或讀取其機密值時，才解密那一個檔案 | 該 Item 任何欄位變更後整份重寫（含所有保留版本） |
+| 主機 `hosts` | 開啟主機頁面或綁定查詢時 | Host 或綁定變更後整份重寫 |
+| 操作紀錄 `log` | 開啟紀錄頁面或同步合併時 | 每次操作後（可批次延後） |
+| 加密備份 | `import` 時 | `export --encrypted` 時，內容為標頭 + 全部檔案的明文打包後再整體加密 |
+
+- 列表畫面只需解密索引，不碰任何 Item 檔案；索引的 `summary` 只含非機密欄位。
+- 同步時比對的是 Drive 修訂 ID，不需解密即可判斷是否有變更。
+
+#### 5.1.5 變更主密碼
+
+變更主密碼只需重新包裝每個檔案的 DEK，不需要重新加密內容，因此時間與檔案數成正比、與資料大小無關。
+
+```
+1. 以舊主密碼推導 KEK_old 並驗證（5.1.1）
+2. 產生新 salt，以新主密碼推導 KEK_new
+3. 對每個檔案（index、log、hosts、所有 Item）：
+   a. 下載（或取本機快取，需確認與 Drive 修訂一致）
+   b. 以 KEK_old 解包 DEK（5.1.3 第 3 步）
+   c. 以 KEK_new 與新的 dek_nonce 重新包裝 DEK
+   d. 替換標頭中的 dek_nonce 與 wrapped_dek；nonce 與 ciphertext 不變
+   e. 因 AAD 包含標頭，內容需以 DEK 重新計算 GCM tag：
+      實作上直接以同一 DEK、新 nonce 重新加密 compressed（成本極低）
+   f. 上傳到暫存名稱（原檔名加 `.rekey` 後綴，appProperties 標 hsm.rekey=1）
+4. 全部檔案上傳成功後：
+   a. 更新標頭：新 kdf.salt、新 kek_check、以 KEK_new 重新包裝的 recovery.wrapped_kek
+   b. 上傳新標頭
+   c. 逐一將 `.rekey` 檔案改回正式名稱並刪除舊檔
+5. 任一步失敗：刪除所有 `.rekey` 檔案，標頭未更新，舊主密碼仍有效
+6. zeroize KEK_old、KEK_new 保留為目前 KEK
+```
+
+- 第 4 步之前，Drive 上同時存在舊密文與 `.rekey` 新密文，其他裝置仍以舊主密碼運作。
+- 第 4b 之後其他裝置解鎖時會發現 `kek_check` 無法通過，提示「主密碼已在其他裝置變更，請輸入新主密碼」。
+- Drive 的修訂歷史會保留舊密文一段時間，這些舊密文仍只能用舊主密碼解開；舊主密碼外洩時應視為需要輪替內容而非只換主密碼。
+
+#### 5.1.6 復原金鑰
+
+```
+建立（init 或 regenerate）：
+  RK        = CSPRNG(32 bytes)，以 Base32 顯示給使用者（52 字元，每 4 字一組）
+  hkdf_salt = CSPRNG(32 bytes)
+  RK_key    = HKDF-SHA256(ikm=RK, salt=hkdf_salt, info="hsm-recovery-v1", len=32)
+  recovery.wrapped_kek = AES-256-GCM-Encrypt(key=RK_key, nonce=CSPRNG(12),
+                           aad=vault_id, pt=KEK)
+  存入標頭 recovery 區段；RK 本身不存任何地方，顯示後 zeroize
+
+使用（遺忘主密碼）：
+  1. 使用者輸入 RK（Base32，忽略空白與大小寫）
+  2. 推導 RK_key，解包得到 KEK；失敗 → 復原金鑰錯誤
+  3. 要求設定新主密碼，執行 5.1.5 的流程，但第 1 步改為「KEK_old = 此 KEK」
+  4. 建議使用者同時重新產生復原金鑰
+```
+
+- 復原金鑰解開的是 KEK，不是個別 DEK，因此復原後所有檔案立即可讀，不需逐檔處理。
+- 變更主密碼不影響復原金鑰（5.1.5 第 4a 步只是以新 KEK 重新包裝，KEK 本身未變）。
+
+#### 5.1.7 演算法與參數總表
+
+| 用途 | 演算法 | 參數 |
+|------|--------|------|
+| 主密碼 → KEK | Argon2id | 256 MB、3 次、4 並行、32-byte salt、輸出 32 bytes；參數存於標頭可調 |
+| 復原金鑰 → RK_key | HKDF-SHA256 | 32-byte salt、info `hsm-recovery-v1` |
+| 包裝 DEK、KEK 驗證、包裝 KEK | AES-256-GCM | 12-byte 隨機 nonce、16-byte tag |
+| 檔案內容加密 | AES-256-GCM | 每檔案獨立 DEK、12-byte 隨機 nonce、AAD = 檔案標頭 |
+| 壓縮 | zstd | 加密前壓縮，解壓上限 64 MB |
+| 隨機來源 | 作業系統 CSPRNG | `crypto/rand` 或等效 |
+| 記憶體清除 | zeroize | 所有金鑰、明文緩衝區使用後覆寫 |
+
+不使用自行設計的密碼學構造；所有原語皆為標準庫或經審計的套件實作。
 
 ### 5.2 Google Drive 上可見的資訊
 
